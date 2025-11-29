@@ -1,0 +1,17 @@
+{
+  "name": "github-repo-collaborators",
+  "version": "1.0.0",
+  "description": "A Node.js app to view GitHub repositories and their collaborators",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node index.js"
+  },
+  "keywords": ["github", "api", "repositories", "collaborators"],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "axios": "^1.6.0",
+    "dotenv": "^16.3.0"
+  }
+}
