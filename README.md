@@ -1,8 +1,21 @@
 # GitHub Repository Collaborator Viewer
 
-A Node.js application that connects to your GitHub account and displays all your repositories along with their collaborators.
+A Node.js application that connects to your GitHub account, shows the collaborators on your repositories, and syncs your local clones with a web UI.
 
 ## Features
+
+- 🖥️ Local web UI (`npm start`) with two tabs: **Sync** and **Collaborators**
+- 🔄 **Sync**: finds every git clone under the app's parent directory and matches it to your GitHub repos
+  - Fetch, pull (merge / rebase / fast-forward only) and push. The upstream is set on first push, and force-with-lease is offered after an amend
+  - Stage, unstage or discard single files or everything; commit or amend
+  - Stash changes, then apply, pop or drop stashes
+  - Abort or continue a merge or rebase that stopped on conflicts
+  - Switch branches (local or remote) and create new ones
+  - Per-file diffs for staged, unstaged and untracked changes
+  - Ahead/behind and uncommitted-change badges
+  - **Fetch all**, and **Pull all**, which fetches everything and then fast-forwards clean repos that are behind
+  - Clone account repos you don't have locally yet
+  - Worktrees are grouped under their main repo; clones of repos outside your account are listed separately
 
 - 📁 Lists all repositories (public and private) from your GitHub account
 - 👥 Shows collaborators for each repository with their permissions
@@ -48,63 +61,62 @@ A Node.js application that connects to your GitHub account and displays all your
 
 ## Usage
 
-Run the application:
+Start the web UI (opens your browser at http://localhost:4321):
 
 ```bash
 npm start
 ```
 
-or
+Or run the original console version, which prints the collaborators table:
 
 ```bash
-node index.js
+npm run cli
 ```
 
-The application will:
-1. Test your GitHub connection
-2. Fetch all your repositories
-3. For each repository, fetch and display collaborators
-4. Show detailed information including permissions and repository stats
+### Sync
 
-## Sample Output
+The Sync tab scans the directory above this project (for example `~/repo` if the app lives in `~/repo/repo-collaborators`) up to 4 levels deep. It skips `node_modules` and hidden folders. Each repo's `origin` remote is matched to your GitHub repos, and the results are shown in three sections:
 
-```
-✅ Connected to GitHub as: yourusername (Your Name)
+- **Cloned**: account repos found on disk (worktrees are indented under their repo)
+- **Local only**: clones whose remote isn't in your account
+- **Not cloned**: account repos with no local copy; **Clone** puts them in the scan directory
 
-📊 Found 25 repositories. Fetching collaborators...
+Click a repository to stage files, view diffs, commit, switch or create branches, and pull/push. Statuses refresh whenever you switch back to the browser tab.
 
-================================================================================
+Git runs with your normal credentials (SSH keys, `core.sshCommand`, credential helpers). For `https://github.com` remotes the app also offers your `GITHUB_TOKEN`, but only when your own credential helpers have nothing. Prompts are disabled, so a missing credential shows up as an error instead of hanging.
 
-[1/25] Processing: yourusername/awesome-project
+Sync works without a `GITHUB_TOKEN`; every clone then shows as "local only".
 
-📁 yourusername/awesome-project
-   Description: An awesome project for doing awesome things
-   Private: No
-   Language: JavaScript
-   Stars: 42 | Forks: 7
-   URL: https://github.com/yourusername/awesome-project
-   👥 Collaborators (3):
-      • yourusername (User) - admin, maintain, push, triage, pull
-      • collaborator1 (User) - push, pull
-      • collaborator2 (User) - pull
-```
+### Options (`.env` or environment)
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `GITHUB_TOKEN` | – | GitHub personal access token |
+| `PORT` | `4321` | Web UI port |
+| `SCAN_ROOT` | parent of this project | Directory scanned for clones, and where new clones go |
+| `SCAN_DEPTH` | `4` | How many directory levels to scan |
+| `NO_OPEN` | – | Set to `1` to skip opening the browser |
 
 ## Error Handling
 
 The application gracefully handles:
 - **403 Forbidden**: When you don't have access to view collaborators (common with organization repos)
 - **404 Not Found**: When a repository is not accessible
-- **Rate Limiting**: Automatic pausing to respect GitHub's API limits
+- **Rate Limiting**: Rate-limited requests are retried. Repositories that still fail are listed as failed instead of being dropped silently
 - **Invalid Tokens**: Clear error messages for authentication issues
 
 ## API Rate Limits
 
 GitHub's API has rate limits:
 - **Authenticated requests**: 5,000 requests per hour
-- The app includes automatic pausing to respect these limits
+- The app retries rate-limited requests (waiting up to a minute) and reports any repositories it still couldn't load
 - For accounts with many repositories, the process may take several minutes
 
 ## Security Notes
+
+- The web UI listens on `127.0.0.1` only. It rejects requests with a foreign `Host` header and any cross-site write request, so other websites can't trigger git actions.
+- Git only runs inside repositories found by the scan, and file paths sent to the API must stay inside that repository.
+- The token is passed to git through the environment, never on the command line.
 
 - Never commit your `.env` file to version control
 - Keep your GitHub token secure and don't share it

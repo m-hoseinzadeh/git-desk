@@ -1,5 +1,6 @@
 require('dotenv').config();
 const GitHubClient = require('./github-client');
+const { buildCollaboratorTable } = require('./lib/collaborators');
 
 class GitHubRepoCollaboratorViewer {
   constructor() {
@@ -13,23 +14,6 @@ class GitHubRepoCollaboratorViewer {
     this.client = new GitHubClient(this.token);
     this.myUsername = null;
     this.tableData = [];
-  }
-
-  /**
-   * Process repository and add to table if it has other collaborators
-   */
-  processRepo(repo, collaborators) {
-    const otherCollaborators = collaborators.filter(c => c.login !== this.myUsername);
-
-    if (otherCollaborators.length === 0) {
-      return;
-    }
-
-    const repoName = repo.name;
-    const others = otherCollaborators.map(c => c.login).join(', ');
-    const owner = repo.owner.login === this.myUsername ? 'Me' : repo.owner.login;
-
-    this.tableData.push({ repoName, others, owner });
   }
 
   /**
@@ -76,19 +60,14 @@ class GitHubRepoCollaboratorViewer {
 
       console.log(`Found ${repositories.length} repositories. Fetching collaborators...`);
 
-      let processedCount = 0;
-      for (const repo of repositories) {
-        processedCount++;
-
-        const collaborators = await this.client.getCollaborators(repo.owner.login, repo.name);
-        this.processRepo(repo, collaborators);
-
-        if (processedCount % 10 === 0) {
-          await new Promise(resolve => setTimeout(resolve, 1000));
-        }
-      }
+      const { rows, failed } = await buildCollaboratorTable(this.client, repositories, this.myUsername);
+      this.tableData = rows;
 
       this.displayTable();
+
+      if (failed.length > 0) {
+        console.warn(`\n⚠️  Could not fetch collaborators for ${failed.length} repositories (GitHub rate limit): ${failed.join(', ')}`);
+      }
 
     } catch (error) {
       console.error('An error occurred:', error.message);

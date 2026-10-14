@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Repo Collaborators</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">⎇</span>
+      <span>Repo Collaborators</span>
+    </div>
+    <nav class="tabs" role="tablist">
+      <button class="tab active" data-tab="sync" role="tab">Sync</button>
+      <button class="tab" data-tab="collaborators" role="tab">Collaborators</button>
+    </nav>
+    <div class="user" id="user"></div>
+  </header>
+
+  <main>
+    <section id="tab-sync" class="tab-panel active">
+      <div class="toolbar">
+        <input id="filter" type="search" placeholder="Filter repositories…" autocomplete="off">
+        <div class="chips" id="view-filter">
+          <button class="chip active" data-filter="all">All</button>
+          <button class="chip" data-filter="dirty">Changes</button>
+          <button class="chip" data-filter="diverged">Ahead / behind</button>
+        </div>
+        <div class="spacer"></div>
+        <button id="btn-rescan" class="btn">Rescan disk</button>
+        <button id="btn-refresh-account" class="btn">Reload GitHub</button>
+        <button id="btn-fetch-all" class="btn">Fetch all</button>
+        <button id="btn-pull-all" class="btn primary" title="Fetch everything, then fast-forward clean repos that are behind">Pull all</button>
+      </div>
+      <div class="notice" id="sync-notice" hidden></div>
+      <div class="bulk-result" id="bulk-result" hidden></div>
+
+      <div class="sync-layout">
+        <div class="repo-list" id="repo-list">
+          <div class="empty">Loading…</div>
+        </div>
+        <aside class="detail" id="detail">
+          <div class="empty">Select a repository to see changes, branches and history.</div>
+        </aside>
+      </div>
+    </section>
+
+    <section id="tab-collaborators" class="tab-panel">
+      <div class="toolbar">
+        <p class="muted">Repositories that have collaborators besides you.</p>
+        <div class="spacer"></div>
+        <button id="btn-refresh-collab" class="btn">Refresh</button>
+      </div>
+      <div id="collab-content" class="card"><div class="empty">Open this tab to load collaborators.</div></div>
+    </section>
+  </main>
+
+  <div class="toasts" id="toasts"></div>
+  <script src="app.js"></script>
+</body>
+</html>

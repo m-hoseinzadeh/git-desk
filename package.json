@@ -1,17 +1,26 @@
 {
   "name": "github-repo-collaborators",
   "version": "1.0.0",
-  "description": "A Node.js app to view GitHub repositories and their collaborators",
-  "main": "index.js",
+  "description": "A Node.js app to view GitHub repository collaborators and sync local clones",
+  "main": "server.js",
   "scripts": {
-    "start": "node index.js",
-    "dev": "node index.js"
+    "start": "node server.js",
+    "cli": "node index.js",
+    "dev": "node --watch server.js"
   },
-  "keywords": ["github", "api", "repositories", "collaborators"],
+  "keywords": [
+    "github",
+    "api",
+    "repositories",
+    "collaborators",
+    "git",
+    "sync"
+  ],
   "author": "",
   "license": "MIT",
   "dependencies": {
     "axios": "^1.6.0",
-    "dotenv": "^16.3.0"
+    "dotenv": "^16.3.0",
+    "express": "^5.3.0"
   }
 }
