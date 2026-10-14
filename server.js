@@ -609,7 +609,9 @@ if (require.main === module) {
     if (!client) {
       console.warn('GITHUB_TOKEN is not set - only local repositories will be shown.');
     }
-    if (process.env.NO_OPEN !== '1') openBrowser(url);
+    // Under `node --watch` (npm run dev) every restart would open another tab
+    const watchMode = process.env.WATCH_REPORT_DEPENDENCIES === '1';
+    if (process.env.NO_OPEN !== '1' && !watchMode) openBrowser(url);
   });
   // Fetch-all and clone can outlast Node's default 5 minute request timeout
   server.requestTimeout = 0;

@@ -733,6 +733,36 @@ function renderSyncProgress() {
     : `Reading status ${progress.done}/${progress.total}`);
 }
 
+// Scroll state of log boxes, keyed by the log's state object, so a new log starts at its end
+const logScroll = new WeakMap();
+
+/**
+ * A log box that stays scrolled to its end, unless the user scrolled up to read it.
+ * Scrolling back to the end makes it follow again.
+ */
+function logBox(source, text, extraClass = '') {
+  const el = h('pre', {
+    class: `output${extraClass}`,
+    onscroll: () => {
+      const atEnd = el.scrollTop + el.clientHeight >= el.scrollHeight - 4;
+      logScroll.set(source, { follow: atEnd, top: el.scrollTop });
+    }
+  }, text);
+  el.logSource = source;
+  return el;
+}
+
+/**
+ * After a re-render, put each log box back at its end, or where the user left it
+ */
+function restoreLogScroll(container) {
+  container.querySelectorAll('pre.output').forEach(el => {
+    if (!el.logSource) return;
+    const saved = logScroll.get(el.logSource);
+    el.scrollTop = !saved || saved.follow ? el.scrollHeight : saved.top;
+  });
+}
+
 function renderBulkResult() {
   const el = document.getElementById('bulk-result');
   const bulk = state.bulk;
@@ -760,8 +790,9 @@ function renderBulkResult() {
       !bulk.running && h('button', { class: 'btn small', onclick: () => { state.bulk = null; renderBulkResult(); } }, 'Dismiss')
     ),
     bulk.running && progressBar(bulk.done, bulk.total),
-    lines.length > 0 && h('pre', { class: 'output' }, lines.join('\n'))
+    lines.length > 0 && logBox(bulk, lines.join('\n'))
   ]));
+  restoreLogScroll(el);
 }
 
 function sectionTitle(label, count) {
@@ -995,6 +1026,7 @@ function renderDetail() {
     return;
   }
   rebuildPreservingFocus(container, () => container.replaceChildren(...nodes(buildDetail(d))));
+  restoreLogScroll(container);
 }
 
 function buildDetail(d) {
@@ -1205,7 +1237,7 @@ function buildDetail(d) {
         h('span', {}, 'Output'),
         h('button', { class: 'btn small', onclick: () => { state.output = null; renderDetail(); } }, 'Clear')
       ),
-      h('pre', { class: `output${state.output.error ? ' error' : ''}` }, state.output.text)
+      logBox(state.output, state.output.text, state.output.error ? ' error' : '')
     ),
     h('div', { class: 'block' },
       h('div', { class: 'block-title' },

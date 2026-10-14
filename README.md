@@ -97,7 +97,7 @@ Sync works without a `GITHUB_TOKEN`; every clone then shows as "local only".
 | `PORT` | `4321` | Web UI port |
 | `SCAN_ROOT` | parent of this project | Directory scanned for clones, and where new clones go |
 | `SCAN_DEPTH` | `4` | How many directory levels to scan |
-| `NO_OPEN` | – | Set to `1` to skip opening the browser |
+| `NO_OPEN` | – | Set to `1` to skip opening the browser (`npm run dev` never opens it) |
 
 ## Error Handling
 
