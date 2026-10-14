@@ -81,7 +81,9 @@ The Sync tab scans the directory above this project (for example `~/repo` if the
 - **Local only**: clones whose remote isn't in your account
 - **Not cloned**: account repos with no local copy; **Clone** puts them in the scan directory
 
-Click a repository to stage files, view diffs, commit, switch or create branches, and pull/push. Statuses refresh whenever you switch back to the browser tab.
+Repositories show up as soon as the disk scan finishes and each status fills in as it is read; GitHub matching follows when GitHub answers. Fetch all, Pull all and the Collaborators tab also show each result as it arrives, with a progress bar.
+
+Click a repository to stage files, view diffs, commit, switch or create branches, and pull/push. When you come back to the browser after 10 seconds or more, statuses are refreshed quietly: only rows that changed are redrawn.
 
 Git runs with your normal credentials (SSH keys, `core.sshCommand`, credential helpers). For `https://github.com` remotes the app also offers your `GITHUB_TOKEN`, but only when your own credential helpers have nothing. Prompts are disabled, so a missing credential shows up as an error instead of hanging.
 

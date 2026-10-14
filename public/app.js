@@ -7,8 +7,16 @@ const PULL_MODES = [
   ['merge', 'Pull (merge)']
 ];
 
+// Coming back to the window after at least this long quietly refreshes statuses
+const RETURN_REFRESH_MS = 10 * 1000;
+
 const state = {
-  sync: null,
+  locals: null, // Top-level local repositories (worktrees nested) from the last scan
+  account: null, // { repos } or { error }; null until GitHub answers
+  scanRoot: '',
+  syncAbort: null, // AbortController of the running /api/sync stream
+  syncProgress: null, // { done, total } while statuses stream in
+  statusAt: {}, // id -> when an action last reported its status, so older stream data can't undo it
   selectedId: null,
   detail: null,
   detailSeq: 0, // Bumped on every detail update so stale responses are ignored
@@ -16,16 +24,14 @@ const state = {
   diff: null,
   diffSeq: 0,
   output: null, // { text, error }
-  bulkResult: null, // { title, lines, error }
+  bulk: null, // { kind, running, done, total, lines, counts, error }
   drafts: { commit: '', branch: '', stash: '' },
   amend: false,
   pullMode: readSetting('pullMode', 'default'),
   filter: '',
   viewFilter: 'all',
   busy: new Set(),
-  summaryEpoch: 0,
-  summaryLog: [], // [{ epoch, summaries }] so a slower /api/sync response can't undo newer summaries
-  collabLoaded: false
+  collab: null // { loading, total, checked, rows, failed, error }
 };
 
 // ---------- helpers ----------
@@ -60,11 +66,17 @@ function h(tag, attrs = {}, ...children) {
     else if (key === 'checked') el.checked = value;
     else el.setAttribute(key, value === true ? '' : value);
   }
-  for (const child of children.flat(Infinity)) {
-    if (child === null || child === undefined || child === false) continue;
-    el.append(child instanceof Node ? child : document.createTextNode(String(child)));
-  }
+  el.append(...nodes(children));
   return el;
+}
+
+/**
+ * Flatten children into nodes, dropping falsy values
+ */
+function nodes(children) {
+  return [children].flat(Infinity)
+    .filter(child => child !== null && child !== undefined && child !== false)
+    .map(child => (child instanceof Node ? child : document.createTextNode(String(child))));
 }
 
 async function api(url, { method = 'GET', body } = {}) {
@@ -85,6 +97,37 @@ async function api(url, { method = 'GET', body } = {}) {
   return data;
 }
 
+/**
+ * Read a newline-delimited JSON stream and call onEvent for each event as it arrives
+ */
+async function stream(url, onEvent, { method = 'GET', signal } = {}) {
+  const response = await fetch(url, { method, signal, headers: { 'X-Requested-With': 'repo-collaborators' } });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.error || `Request failed (${response.status})`);
+  }
+  const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+  let buffer = '';
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += value;
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+      for (const line of lines) {
+        if (!line) continue;
+        const event = JSON.parse(line);
+        if (event.type === 'error') throw new Error(event.error);
+        onEvent(event);
+      }
+    }
+  } catch (error) {
+    reader.cancel().catch(() => {});
+    throw error;
+  }
+}
+
 function toast(message, isError = false) {
   const el = h('div', { class: `toast${isError ? ' error' : ''}` }, message);
   document.getElementById('toasts').append(el);
@@ -92,19 +135,34 @@ function toast(message, isError = false) {
 }
 
 /**
- * Run an async task while marking `key` busy, so buttons can show a spinner.
- * Only re-renders the detail panel when the key belongs to the selected repository.
+ * Run an async task while marking `key` busy, so buttons can show a spinner
  */
 async function withBusy(key, fn) {
   if (state.busy.has(key)) return;
-  const touchesDetail = () => state.selectedId && key.startsWith(`${state.selectedId}:`);
-  state.busy.add(key);
-  touchesDetail() ? render() : renderList();
+  setBusy(key, true);
   try {
     return await fn();
   } finally {
-    state.busy.delete(key);
-    touchesDetail() ? render() : renderList();
+    setBusy(key, false);
+  }
+}
+
+/**
+ * Mark a key busy or idle and re-render only what shows it: a repository row (and the
+ * detail panel when it is the selected repository), a clone row, or a toolbar button
+ */
+function setBusy(key, busy) {
+  if (busy) state.busy.add(key);
+  else state.busy.delete(key);
+
+  const id = key.includes(':') ? key.slice(0, key.indexOf(':')) : null;
+  if (key.startsWith('clone:')) {
+    scheduleListRender();
+  } else if (id && findLocal(id)) {
+    scheduleRows([id]);
+    if (id === state.selectedId) renderDetail();
+  } else {
+    renderToolbar();
   }
 }
 
@@ -114,6 +172,56 @@ function busyLabel(key, label) {
 
 function firstLine(text) {
   return String(text || '').split('\n')[0];
+}
+
+function allLocals() {
+  return (state.locals || []).flatMap(local => [local, ...local.worktrees]);
+}
+
+function findLocal(id) {
+  return allLocals().find(local => local.id === id) || null;
+}
+
+// ---------- render scheduling ----------
+
+// Updates are batched per animation frame: a full list rebuild when the structure changed,
+// otherwise only the rows whose status or busy state changed
+const pending = { list: false, rows: new Set(), collab: false, frame: 0 };
+
+function scheduleListRender() {
+  pending.list = true;
+  scheduleFrame();
+}
+
+function scheduleRows(ids) {
+  ids.forEach(id => pending.rows.add(id));
+  scheduleFrame();
+}
+
+function scheduleCollabRender() {
+  pending.collab = true;
+  scheduleFrame();
+}
+
+function scheduleFrame() {
+  if (!pending.frame) pending.frame = requestAnimationFrame(flushRender);
+}
+
+function flushRender() {
+  pending.frame = 0;
+  const rows = [...pending.rows];
+  pending.rows.clear();
+  // In the "Changes" and "Ahead / behind" views a status change can add or remove rows
+  if (pending.list || (rows.length > 0 && state.viewFilter !== 'all')) {
+    pending.list = false;
+    renderRepoList();
+  } else {
+    rows.forEach(patchRow);
+  }
+  if (pending.collab) {
+    pending.collab = false;
+    renderCollaborators();
+  }
 }
 
 // ---------- data loading ----------
@@ -128,31 +236,109 @@ async function loadUser() {
   }
 }
 
-async function loadSync(params = '') {
-  const startedEpoch = state.summaryEpoch;
+/**
+ * Stream the sync view: GitHub repos, local repos, then one status per repository.
+ * Rows appear right after the disk scan and fill in as their statuses arrive.
+ * A quiet load (coming back to the window) shows no progress and yields to a running load.
+ */
+async function loadSync({ rescan = false, refresh = false, quiet = false } = {}) {
+  if (quiet && state.syncAbort) return;
+  if (state.syncAbort) state.syncAbort.abort();
+  const controller = new AbortController();
+  state.syncAbort = controller;
+  state.syncProgress = quiet ? null : { done: 0, total: null };
+  renderSyncProgress();
+
+  const startedAt = Date.now();
+  const params = new URLSearchParams();
+  if (rescan) params.set('rescan', '1');
+  if (refresh) params.set('refresh', '1');
+
   try {
-    state.sync = await api(`/api/sync${params}`);
-    // Summaries that arrived while this request was running are newer than its snapshot
-    for (const entry of state.summaryLog) {
-      if (entry.epoch > startedEpoch) patchSummaries(entry.summaries);
-    }
+    await stream(`/api/sync?${params}`, event => {
+      if (event.type === 'account') {
+        const account = event.error ? { error: event.error } : { repos: event.repos };
+        // Unchanged data (the usual case on a refresh) leaves the list as it is
+        if (JSON.stringify(account) !== JSON.stringify(state.account)) {
+          state.account = account;
+          scheduleListRender();
+        }
+      } else if (event.type === 'locals') {
+        state.scanRoot = event.scanRoot;
+        if (setLocals(event.locals)) scheduleListRender();
+        if (state.syncProgress) state.syncProgress.total = allLocals().length;
+      } else if (event.type === 'status') {
+        if (state.syncProgress) state.syncProgress.done++;
+        // An action that finished after this load started has the newer status
+        if (!(state.statusAt[event.id] > startedAt)) setStatus(event.id, event.status);
+      }
+      renderSyncProgress();
+    }, { signal: controller.signal });
   } catch (error) {
+    if (error.name === 'AbortError') return;
     toast(error.message, true);
+  } finally {
+    if (state.syncAbort === controller) {
+      state.syncAbort = null;
+      state.syncProgress = null;
+      renderSyncProgress();
+    }
   }
-  renderList();
 }
 
 /**
- * Load the detail for a repository. Responses that arrive after a newer
- * selection or update are dropped.
+ * Replace the scanned repositories, keeping statuses already known so rows don't blank out.
+ * Returns whether the set of repositories changed.
+ */
+function setLocals(locals) {
+  const shape = list => JSON.stringify(list, (key, value) => (key === 'status' ? undefined : value));
+  const changed = !state.locals || shape(locals) !== shape(state.locals);
+  const known = new Map(allLocals().map(local => [local.id, local.status]));
+  state.locals = locals;
+  for (const local of allLocals()) local.status = known.get(local.id) || null;
+
+  if (state.selectedId && !findLocal(state.selectedId)) {
+    state.selectedId = null;
+    state.detail = null;
+    closeDiff();
+    renderDetail();
+  }
+  return changed;
+}
+
+function setStatus(id, status) {
+  const local = findLocal(id);
+  if (!local) return;
+  const changed = JSON.stringify(status) !== JSON.stringify(local.status);
+  local.status = status;
+  if (changed) scheduleRows([id]);
+}
+
+/**
+ * Apply statuses reported by an action or a bulk operation
+ */
+function applySummaries(summaries) {
+  if (!summaries) return;
+  const now = Date.now();
+  for (const [id, status] of Object.entries(summaries)) {
+    state.statusAt[id] = now;
+    setStatus(id, status);
+  }
+}
+
+/**
+ * Load the detail for a repository. Responses that arrive after a newer selection
+ * or update are dropped, and an unchanged detail isn't re-rendered.
  */
 async function loadDetail(id) {
   const seq = ++state.detailSeq;
   try {
     const detail = await api(`/api/repo/status?id=${encodeURIComponent(id)}`);
     if (seq !== state.detailSeq || id !== state.selectedId) return;
+    const unchanged = JSON.stringify(detail) === JSON.stringify(state.detail);
     state.detail = detail;
     await refreshSelectedFileDiff();
+    if (unchanged) return;
   } catch (error) {
     if (seq !== state.detailSeq || id !== state.selectedId) return;
     state.detail = null;
@@ -170,7 +356,8 @@ async function selectRepo(id) {
     state.detail = null;
   }
   state.selectedId = id;
-  render();
+  markSelectedRow();
+  renderDetail();
   await loadDetail(id);
 }
 
@@ -195,7 +382,7 @@ async function loadDiff() {
   });
   try {
     const { diff } = await api(`/api/repo/diff?${params}`);
-    if (seq !== state.diffSeq) return;
+    if (seq !== state.diffSeq || diff === state.diff) return;
     state.diff = diff;
   } catch (error) {
     if (seq !== state.diffSeq) return;
@@ -203,27 +390,6 @@ async function loadDiff() {
     toast(error.message, true);
   }
   renderDetail();
-}
-
-/**
- * Update list summaries in place for the given repository ids
- */
-function patchSummaries(summaries) {
-  if (!state.sync || !summaries) return;
-  const visit = local => {
-    if (summaries[local.id]) local.status = summaries[local.id];
-    (local.worktrees || []).forEach(visit);
-  };
-  state.sync.matched.forEach(repo => repo.locals.forEach(visit));
-  state.sync.localOnly.forEach(visit);
-}
-
-function applySummaries(summaries) {
-  if (!summaries) return;
-  state.summaryEpoch++;
-  state.summaryLog.push({ epoch: state.summaryEpoch, summaries });
-  state.summaryLog = state.summaryLog.slice(-50);
-  patchSummaries(summaries);
 }
 
 /**
@@ -298,72 +464,143 @@ async function cloneRepo(fullName) {
   });
 }
 
-async function fetchAll() {
-  await withBusy('fetch-all', async () => {
+/**
+ * Fetch all or pull all. Each repository's result shows up as soon as it is done.
+ */
+async function runBulk(kind) {
+  await withBusy(`${kind}-all`, async () => {
+    const bulk = {
+      kind,
+      running: true,
+      done: 0,
+      total: null,
+      lines: [],
+      counts: { pulled: 0, skipped: 0, failed: 0 },
+      error: false
+    };
+    state.bulk = bulk;
+    const syncing = new Set();
+    const finishRepo = id => {
+      if (syncing.delete(id)) setBusy(`${id}:sync`, false);
+      bulk.done++;
+    };
+
     try {
-      const { results } = await api('/api/sync/fetch-all', { method: 'POST' });
-      const failed = results.filter(r => !r.ok);
-      state.bulkResult = {
-        title: `Fetched ${results.length - failed.length} of ${results.length} repositories`,
-        lines: failed.map(f => `✗ ${f.relPath}: ${firstLine(f.error)}`),
-        error: failed.length > 0
-      };
-      await loadSync();
-      if (state.selectedId) await loadDetail(state.selectedId);
+      await stream(`/api/sync/${kind}-all`, event => {
+        if (event.type === 'start') {
+          bulk.total = event.total;
+        } else if (event.type === 'begin') {
+          syncing.add(event.id);
+          setBusy(`${event.id}:sync`, true);
+        } else if (event.type === 'fetched') {
+          finishRepo(event.id);
+          if (!event.ok) {
+            bulk.counts.failed++;
+            bulk.lines.push(`✗ ${event.relPath}: ${firstLine(event.error)}`);
+          }
+          applySummaries(event.summaries);
+        } else if (event.type === 'group') {
+          finishRepo(event.id);
+          for (const result of event.results) {
+            bulk.counts[result.kind]++;
+            bulk.lines.push(pullResultLine(result));
+          }
+          applySummaries(event.summaries);
+        }
+        renderBulkResult();
+        renderToolbar();
+      }, { method: 'POST' });
     } catch (error) {
+      bulk.lines.push(`✗ ${error.message}`);
+      bulk.counts.failed++;
       toast(error.message, true);
+    } finally {
+      syncing.forEach(id => setBusy(`${id}:sync`, false));
+      bulk.running = false;
+      bulk.error = bulk.counts.failed > 0;
+      renderBulkResult();
     }
+    if (state.selectedId) loadDetail(state.selectedId);
   });
 }
 
-async function pullAll() {
-  await withBusy('pull-all', async () => {
-    try {
-      const { pulled, skipped, failed } = await api('/api/sync/pull-all', { method: 'POST' });
-      state.bulkResult = {
-        title: `Pulled ${pulled.length} · skipped ${skipped.length} · failed ${failed.length}`,
-        lines: [
-          ...pulled.map(p => `✓ ${p.relPath}: ${p.commits} new commit${p.commits === 1 ? '' : 's'}`),
-          ...skipped.map(s => `– ${s.relPath}: skipped, ${s.reason}`),
-          ...failed.map(f => `✗ ${f.relPath}: ${firstLine(f.error)}`)
-        ],
-        error: failed.length > 0
-      };
-      if (pulled.length + skipped.length + failed.length === 0) {
-        state.bulkResult.lines = ['Everything is up to date.'];
-      }
-      await loadSync();
-      if (state.selectedId) await loadDetail(state.selectedId);
-    } catch (error) {
-      toast(error.message, true);
-    }
-  });
+function pullResultLine(result) {
+  if (result.kind === 'pulled') {
+    return `✓ ${result.relPath}: ${result.commits} new commit${result.commits === 1 ? '' : 's'}`;
+  }
+  if (result.kind === 'skipped') return `– ${result.relPath}: skipped, ${result.reason}`;
+  return `✗ ${result.relPath}: ${firstLine(result.error)}`;
 }
 
+/**
+ * Stream the collaborators table; rows show up as each repository is checked
+ */
 async function loadCollaborators(refresh = false) {
-  const container = document.getElementById('collab-content');
-  container.replaceChildren(h('div', { class: 'empty' }, h('span', { class: 'spinner' }), ' Loading collaborators… this can take a while for many repositories.'));
+  if (state.collab?.loading) return;
+  const collab = { loading: true, total: null, checked: 0, rows: [], failed: [], error: null };
+  state.collab = collab;
+  renderCollaborators();
   try {
-    const { rows, failed } = await api(`/api/collaborators${refresh ? '?refresh=1' : ''}`);
-    state.collabLoaded = true;
-    const warning = failed.length > 0 && h('div', { class: 'notice' },
-      `Couldn't load collaborators for ${failed.length} repositories because GitHub rate-limited the requests. ` +
-      `Press Refresh later to retry: ${failed.join(', ')}`);
-    if (rows.length === 0) {
-      container.replaceChildren(...[warning, h('div', { class: 'empty' }, 'No repositories with other collaborators found.')].filter(Boolean));
-      return;
-    }
-    container.replaceChildren(...[warning, h('table', {},
+    await stream(`/api/collaborators${refresh ? '?refresh=1' : ''}`, event => {
+      if (event.type === 'start') {
+        collab.total = event.total;
+      } else if (event.type === 'result') {
+        collab.checked++;
+        if (event.row) {
+          collab.rows.push({ index: event.index, ...event.row });
+          collab.rows.sort((a, b) => a.index - b.index);
+        }
+        if (event.failed) collab.failed.push(event.failed);
+      }
+      scheduleCollabRender();
+    });
+  } catch (error) {
+    collab.error = error.message;
+  }
+  collab.loading = false;
+  renderCollaborators();
+}
+
+// ---------- rendering: collaborators ----------
+
+function progressBar(done, total) {
+  const percent = total ? Math.round((done / total) * 100) : 0;
+  return h('div', { class: `progress${total ? '' : ' indeterminate'}` },
+    h('div', { class: 'progress-fill', style: total ? `width:${percent}%` : null }));
+}
+
+function renderCollaborators() {
+  const container = document.getElementById('collab-content');
+  const button = document.getElementById('btn-refresh-collab');
+  const collab = state.collab;
+  const loading = Boolean(collab?.loading);
+  button.disabled = loading;
+  button.replaceChildren(...nodes(loading ? [h('span', { class: 'spinner' }), ' Refresh'] : 'Refresh'));
+  if (!collab) return;
+
+  const status = collab.loading && h('div', { class: 'collab-progress' },
+    h('div', { class: 'muted' }, collab.total === null
+      ? 'Loading your repositories…'
+      : `Checking collaborators: ${collab.checked} of ${collab.total} repositories`),
+    progressBar(collab.checked, collab.total));
+  const warning = !collab.loading && collab.failed.length > 0 && h('div', { class: 'notice' },
+    `Couldn't load collaborators for ${collab.failed.length} repositories because GitHub rate-limited the requests. ` +
+    `Press Refresh later to retry: ${collab.failed.join(', ')}`);
+  const error = collab.error && h('div', { class: 'notice' }, collab.error);
+
+  let body = null;
+  if (collab.rows.length > 0) {
+    body = h('table', {},
       h('thead', {}, h('tr', {}, h('th', {}, 'Repository'), h('th', {}, 'Collaborators'), h('th', {}, 'Owner'))),
-      h('tbody', {}, rows.map(row => h('tr', {},
+      h('tbody', {}, collab.rows.map(row => h('tr', {},
         h('td', {}, h('a', { href: row.url, target: '_blank', rel: 'noopener' }, row.repoName)),
         h('td', {}, row.others),
         h('td', {}, row.owner)
-      )))
-    )].filter(Boolean));
-  } catch (error) {
-    container.replaceChildren(h('div', { class: 'empty' }, error.message));
+      ))));
+  } else if (!collab.loading && !collab.error) {
+    body = h('div', { class: 'empty' }, 'No repositories with other collaborators found.');
   }
+  container.replaceChildren(...nodes([status, error, warning, body]));
 }
 
 // ---------- rendering: repository list ----------
@@ -379,10 +616,14 @@ function matchesFilter(texts, local) {
   return true;
 }
 
-function statusPills(status) {
-  if (!status) return [];
-  if (status.error) return [h('span', { class: 'pill error', title: status.error }, 'error')];
+function statusPills(local) {
+  const status = local.status;
+  const syncing = (state.busy.has(`${local.id}:sync`) || state.busy.has(`${local.id}:fetch`)) &&
+    h('span', { class: 'pill', title: 'fetching' }, h('span', { class: 'spinner small' }));
+  if (!status) return [syncing, h('span', { class: 'pill pending', title: 'Reading status…' }, '···')];
+  if (status.error) return [syncing, h('span', { class: 'pill error', title: status.error }, 'error')];
   return [
+    syncing,
     h('span', { class: 'pill', title: status.upstream ? `tracking ${status.upstream}` : 'no upstream' }, status.branch || 'detached'),
     status.ahead > 0 && h('span', { class: 'pill ahead', title: 'commits to push' }, `↑${status.ahead}`),
     status.behind > 0 && h('span', { class: 'pill behind', title: 'commits to pull' }, `↓${status.behind}`),
@@ -393,27 +634,36 @@ function statusPills(status) {
   ];
 }
 
-function localRow(local, title, { worktree = false } = {}) {
+function rowActions(local) {
   const stop = fn => event => { event.stopPropagation(); fn(); };
+  return [
+    h('button', {
+      class: 'btn small',
+      title: PULL_MODES.find(([mode]) => mode === state.pullMode)[1],
+      disabled: state.busy.has(`${local.id}:pull`),
+      onclick: stop(() => runAction(local.id, 'pull', { mode: state.pullMode }))
+    }, busyLabel(`${local.id}:pull`, 'Pull')),
+    h('button', {
+      class: 'btn small',
+      title: 'git push',
+      disabled: state.busy.has(`${local.id}:push`),
+      onclick: stop(() => runAction(local.id, 'push'))
+    }, busyLabel(`${local.id}:push`, 'Push'))
+  ];
+}
+
+function localRow(local, title, { worktree = false } = {}) {
   return h('div', {
     class: `repo-row${worktree ? ' worktree' : ''}${state.selectedId === local.id ? ' selected' : ''}`,
+    'data-id': local.id,
     onclick: () => selectRepo(local.id)
   },
     h('div', { class: 'repo-main' },
       h('div', { class: 'repo-name' }, title),
       h('div', { class: 'repo-path' }, local.relPath)
     ),
-    h('div', { class: 'repo-meta' }, statusPills(local.status)),
-    h('div', { class: 'repo-actions' },
-      h('button', {
-        class: 'btn small',
-        title: PULL_MODES.find(([mode]) => mode === state.pullMode)[1],
-        disabled: state.busy.has(`${local.id}:pull`),
-        onclick: stop(() => runAction(local.id, 'pull', { mode: state.pullMode }))
-      }, busyLabel(`${local.id}:pull`, 'Pull')),
-      h('button', { class: 'btn small', title: 'git push', disabled: state.busy.has(`${local.id}:push`), onclick: stop(() => runAction(local.id, 'push')) },
-        busyLabel(`${local.id}:push`, 'Push'))
-    )
+    h('div', { class: 'repo-meta' }, statusPills(local)),
+    h('div', { class: 'repo-actions' }, rowActions(local))
   );
 }
 
@@ -424,64 +674,156 @@ function localRows(local, title) {
   ];
 }
 
+/**
+ * Update one row's status and buttons in place, leaving the rest of the list alone
+ */
+function patchRow(id) {
+  const el = document.querySelector(`.repo-row[data-id="${id}"]`);
+  const local = findLocal(id);
+  if (!el || !local) return;
+  el.querySelector('.repo-meta').replaceChildren(...nodes(statusPills(local)));
+  el.querySelector('.repo-actions').replaceChildren(...nodes(rowActions(local)));
+}
+
+function markSelectedRow() {
+  document.querySelectorAll('.repo-row.selected').forEach(el => el.classList.remove('selected'));
+  if (state.selectedId) {
+    document.querySelector(`.repo-row[data-id="${state.selectedId}"]`)?.classList.add('selected');
+  }
+}
+
+/**
+ * Match local clones to account repositories. Until GitHub answers, every local
+ * repository is listed in one section.
+ */
+function syncView() {
+  const locals = state.locals || [];
+  const repos = state.account?.repos;
+  if (!repos) return { matched: [], localOnly: locals, notCloned: [] };
+
+  const accountNames = new Set(repos.map(r => r.fullName.toLowerCase()));
+  const localsByName = new Map();
+  const localOnly = [];
+  for (const local of locals) {
+    if (local.fullName && accountNames.has(local.fullName)) {
+      if (!localsByName.has(local.fullName)) localsByName.set(local.fullName, []);
+      localsByName.get(local.fullName).push(local);
+    } else {
+      localOnly.push(local);
+    }
+  }
+
+  const matched = [];
+  const notCloned = [];
+  for (const repo of repos) {
+    const matches = localsByName.get(repo.fullName.toLowerCase());
+    if (matches) matched.push({ ...repo, locals: matches });
+    else notCloned.push(repo);
+  }
+  return { matched, localOnly, notCloned };
+}
+
+function renderSyncProgress() {
+  const el = document.getElementById('sync-status');
+  const progress = state.syncProgress;
+  el.hidden = !progress;
+  if (!progress) return;
+  el.replaceChildren(h('span', { class: 'spinner small' }), ' ', progress.total === null
+    ? 'Scanning folders…'
+    : `Reading status ${progress.done}/${progress.total}`);
+}
+
 function renderBulkResult() {
   const el = document.getElementById('bulk-result');
-  const result = state.bulkResult;
-  el.hidden = !result;
-  if (!result) return;
-  el.className = `bulk-result${result.error ? ' error' : ''}`;
-  el.replaceChildren(
+  const bulk = state.bulk;
+  el.hidden = !bulk;
+  if (!bulk) return;
+
+  const { pulled, skipped, failed } = bulk.counts;
+  let title;
+  if (bulk.running) {
+    const counted = bulk.total === null ? '' : ` ${bulk.done}/${bulk.total}`;
+    title = `${bulk.kind === 'fetch' ? 'Fetching' : 'Pulling'}${counted}…`;
+  } else if (bulk.kind === 'fetch') {
+    title = `Fetched ${bulk.done - failed} of ${bulk.total ?? bulk.done} repositories`;
+  } else {
+    title = `Pulled ${pulled} · skipped ${skipped} · failed ${failed}`;
+  }
+  const lines = !bulk.running && bulk.lines.length === 0 && bulk.kind === 'pull'
+    ? ['Everything is up to date.']
+    : bulk.lines;
+
+  el.className = `bulk-result${bulk.error ? ' error' : ''}`;
+  el.replaceChildren(...nodes([
     h('div', { class: 'block-title' },
-      h('span', {}, result.title),
-      h('button', { class: 'btn small', onclick: () => { state.bulkResult = null; renderBulkResult(); } }, 'Dismiss')
+      h('span', {}, bulk.running && h('span', { class: 'spinner small' }), bulk.running && ' ', title),
+      !bulk.running && h('button', { class: 'btn small', onclick: () => { state.bulk = null; renderBulkResult(); } }, 'Dismiss')
     ),
-    result.lines.length > 0 && h('pre', { class: 'output' }, result.lines.join('\n'))
-  );
+    bulk.running && progressBar(bulk.done, bulk.total),
+    lines.length > 0 && h('pre', { class: 'output' }, lines.join('\n'))
+  ]));
+}
+
+function sectionTitle(label, count) {
+  return h('div', { class: 'section-title' }, h('span', {}, label), h('span', {}, count));
 }
 
 function renderRepoList() {
   const container = document.getElementById('repo-list');
-  const sync = state.sync;
-  if (!sync) {
-    container.replaceChildren(h('div', { class: 'empty' }, h('span', { class: 'spinner' }), ' Scanning…'));
+  if (!state.locals) {
+    container.replaceChildren(h('div', { class: 'empty' }, h('span', { class: 'spinner' }), ' Scanning folders…'));
     return;
   }
 
   const notice = document.getElementById('sync-notice');
-  notice.hidden = !sync.accountError;
-  notice.textContent = sync.accountError ? `GitHub: ${sync.accountError}` : '';
+  const accountError = state.account?.error;
+  notice.hidden = !accountError;
+  notice.textContent = accountError ? `GitHub: ${accountError}` : '';
 
-  const matched = sync.matched.filter(r => matchesFilter([r.fullName, ...r.locals.map(l => l.relPath)], r.locals));
-  const localOnly = sync.localOnly.filter(l => matchesFilter([l.name, l.relPath, l.remoteUrl], l));
+  const view = syncView();
+  const matched = view.matched.filter(r => matchesFilter([r.fullName, ...r.locals.map(l => l.relPath)], r.locals));
+  const localOnly = view.localOnly.filter(l => matchesFilter([l.name, l.relPath, l.remoteUrl], l));
   const notCloned = state.viewFilter === 'all'
-    ? sync.notCloned.filter(r => matchesFilter([r.fullName], []))
+    ? view.notCloned.filter(r => matchesFilter([r.fullName], []))
     : [];
-
+  const none = () => h('div', { class: 'file-none empty' }, 'Nothing here.');
   const sections = [];
 
-  sections.push(h('div', { class: 'section-title' }, h('span', {}, 'Cloned'), h('span', {}, matched.length)));
-  if (matched.length === 0) sections.push(h('div', { class: 'file-none empty' }, 'Nothing here.'));
-  for (const repo of matched) {
-    repo.locals.forEach(local => sections.push(localRows(local, repo.fullName)));
+  if (!state.account) {
+    // GitHub hasn't answered yet: show everything found on disk
+    sections.push(h('div', { class: 'section-title' },
+      h('span', {}, 'Local repositories ', h('span', { class: 'section-note' }, h('span', { class: 'spinner small' }), ' matching with GitHub…')),
+      h('span', {}, localOnly.length)));
+    if (localOnly.length === 0) sections.push(none());
+    localOnly.forEach(local => sections.push(localRows(local, local.fullName || local.name)));
+    container.replaceChildren(...nodes(sections));
+    return;
   }
 
-  if (localOnly.length || state.viewFilter === 'all') {
-    sections.push(h('div', { class: 'section-title' }, h('span', {}, 'Local only (not in your account)'), h('span', {}, localOnly.length)));
-    if (localOnly.length === 0) sections.push(h('div', { class: 'file-none empty' }, 'Nothing here.'));
-    for (const local of localOnly) {
-      sections.push(localRows(local, local.fullName || local.name));
+  // Without the account list (GitHub error) nothing can be matched, so skip the empty section
+  if (state.account.repos) {
+    sections.push(sectionTitle('Cloned', matched.length));
+    if (matched.length === 0) sections.push(none());
+    for (const repo of matched) {
+      repo.locals.forEach(local => sections.push(localRows(local, repo.fullName)));
     }
   }
 
-  if (state.viewFilter === 'all') {
-    sections.push(h('div', { class: 'section-title' }, h('span', {}, 'Not cloned'), h('span', {}, notCloned.length)));
-    if (notCloned.length === 0) sections.push(h('div', { class: 'file-none empty' }, 'Nothing here.'));
+  if (localOnly.length || state.viewFilter === 'all') {
+    sections.push(sectionTitle(state.account.repos ? 'Local only (not in your account)' : 'Local repositories', localOnly.length));
+    if (localOnly.length === 0) sections.push(none());
+    localOnly.forEach(local => sections.push(localRows(local, local.fullName || local.name)));
+  }
+
+  if (state.viewFilter === 'all' && state.account.repos) {
+    sections.push(sectionTitle('Not cloned', notCloned.length));
+    if (notCloned.length === 0) sections.push(none());
     for (const repo of notCloned) {
       const key = `clone:${repo.fullName}`;
       sections.push(h('div', { class: 'repo-row static' },
         h('div', { class: 'repo-main' },
           h('div', { class: 'repo-name' }, repo.fullName),
-          h('div', { class: 'repo-path' }, `→ ${sync.scanRoot}/${repo.name}`)
+          h('div', { class: 'repo-path' }, `→ ${state.scanRoot}/${repo.name}`)
         ),
         h('div', { class: 'repo-meta' }, repo.private && h('span', { class: 'pill private' }, 'private')),
         h('div', { class: 'repo-actions' },
@@ -491,7 +833,7 @@ function renderRepoList() {
     }
   }
 
-  container.replaceChildren(...sections.flat(Infinity));
+  container.replaceChildren(...nodes(sections));
 }
 
 // ---------- rendering: detail panel ----------
@@ -642,10 +984,17 @@ function renderDetail() {
   }
   const d = state.detail;
   if (!d) {
-    container.replaceChildren(h('div', { class: 'empty' }, h('span', { class: 'spinner' }), ' Loading…'));
+    // Show what the list already knows while the full status loads
+    const local = findLocal(state.selectedId);
+    container.replaceChildren(...nodes([
+      local && h('div', { class: 'detail-header' },
+        h('h2', {}, local.fullName || local.name),
+        h('div', { class: 'repo-path' }, local.path)),
+      h('div', { class: 'empty' }, h('span', { class: 'spinner' }), ' Loading…')
+    ]));
     return;
   }
-  rebuildPreservingFocus(container, () => container.replaceChildren(...buildDetail(d).filter(Boolean)));
+  rebuildPreservingFocus(container, () => container.replaceChildren(...nodes(buildDetail(d))));
 }
 
 function buildDetail(d) {
@@ -723,7 +1072,7 @@ function buildDetail(d) {
     onchange: event => {
       state.pullMode = event.target.value;
       writeSetting('pullMode', state.pullMode);
-      renderList();
+      scheduleListRender();
     }
   }, PULL_MODES.map(([mode, label]) => h('option', { value: mode, selected: mode === state.pullMode }, label)));
 
@@ -896,28 +1245,21 @@ function buildDetail(d) {
 }
 
 function renderToolbar() {
+  const bulk = state.bulk;
+  const progress = bulk?.running && bulk.total !== null ? ` ${bulk.done}/${bulk.total}` : '';
   const buttons = [
     ['btn-rescan', 'rescan', 'Rescan disk'],
     ['btn-refresh-account', 'refresh', 'Reload GitHub'],
-    ['btn-fetch-all', 'fetch-all', 'Fetch all'],
-    ['btn-pull-all', 'pull-all', 'Pull all']
+    ['btn-fetch-all', 'fetch-all', state.busy.has('fetch-all') ? `Fetching${progress}` : 'Fetch all'],
+    ['btn-pull-all', 'pull-all', state.busy.has('pull-all') ? `Pulling${progress}` : 'Pull all']
   ];
   for (const [elementId, key, label] of buttons) {
     const button = document.getElementById(elementId);
-    button.disabled = state.busy.has(key);
-    button.replaceChildren(...[busyLabel(key, label)].flat());
+    // Fetch all and pull all both move every repository, so only one runs at a time
+    button.disabled = state.busy.has(key) ||
+      (key.endsWith('-all') && (state.busy.has('fetch-all') || state.busy.has('pull-all')));
+    button.replaceChildren(...nodes(busyLabel(key, label)));
   }
-}
-
-function renderList() {
-  renderToolbar();
-  renderBulkResult();
-  renderRepoList();
-}
-
-function render() {
-  renderList();
-  renderDetail();
 }
 
 // ---------- wiring ----------
@@ -926,7 +1268,7 @@ document.querySelectorAll('.tab').forEach(tab => {
   tab.addEventListener('click', () => {
     document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t === tab));
     document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('active', p.id === `tab-${tab.dataset.tab}`));
-    if (tab.dataset.tab === 'collaborators' && !state.collabLoaded) loadCollaborators();
+    if (tab.dataset.tab === 'collaborators' && !state.collab) loadCollaborators();
   });
 });
 
@@ -943,22 +1285,36 @@ document.querySelectorAll('#view-filter .chip').forEach(chip => {
   });
 });
 
-document.getElementById('btn-rescan').addEventListener('click', () => withBusy('rescan', () => loadSync('?rescan=1')));
-document.getElementById('btn-refresh-account').addEventListener('click', () => withBusy('refresh', () => loadSync('?refresh=1')));
-document.getElementById('btn-fetch-all').addEventListener('click', fetchAll);
-document.getElementById('btn-pull-all').addEventListener('click', pullAll);
+document.getElementById('btn-rescan').addEventListener('click', () => withBusy('rescan', () => loadSync({ rescan: true })));
+document.getElementById('btn-refresh-account').addEventListener('click', () => withBusy('refresh', () => loadSync({ refresh: true })));
+document.getElementById('btn-fetch-all').addEventListener('click', () => runBulk('fetch'));
+document.getElementById('btn-pull-all').addEventListener('click', () => runBulk('pull'));
 document.getElementById('btn-refresh-collab').addEventListener('click', () => loadCollaborators(true));
 
-// Files change outside the app (editor, terminal), so refresh statuses when the user comes back
-let lastFocusRefresh = Date.now();
+// Files change outside the app (editor, terminal), so statuses are refreshed when the user
+// comes back after a while. Short trips (a confirm dialog, a quick alt-tab) don't count,
+// and only rows whose status actually changed are redrawn.
+let awaySince = null;
+function markAway() {
+  if (awaySince === null) awaySince = Date.now();
+}
 function refreshOnReturn() {
-  if (document.visibilityState !== 'visible' || Date.now() - lastFocusRefresh < 3000) return;
-  lastFocusRefresh = Date.now();
-  loadSync();
+  if (document.visibilityState !== 'visible') {
+    markAway();
+    return;
+  }
+  if (awaySince === null) return;
+  const away = Date.now() - awaySince;
+  awaySince = null;
+  if (away < RETURN_REFRESH_MS || state.busy.size > 0) return;
+  loadSync({ quiet: true });
   if (state.selectedId) loadDetail(state.selectedId);
 }
+window.addEventListener('blur', markAway);
 window.addEventListener('focus', refreshOnReturn);
 document.addEventListener('visibilitychange', refreshOnReturn);
 
+renderToolbar();
+renderRepoList();
 loadUser();
-loadSync();
+loadSync({ rescan: true });

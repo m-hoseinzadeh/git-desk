@@ -367,6 +367,24 @@ td a { color: var(--accent); text-decoration: none; }
   vertical-align: -2px;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+.spinner.small { width: 10px; height: 10px; border-width: 1.5px; vertical-align: -1px; }
+
+.sync-status { font-size: 13px; white-space: nowrap; }
+.sync-status[hidden] { display: none; }
+.section-note { text-transform: none; letter-spacing: 0; font-weight: 400; }
+.pill.pending { color: var(--muted); border-style: dashed; animation: pulse 1.2s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: .4; } }
+
+.progress { height: 4px; border-radius: 2px; background: var(--surface-2); overflow: hidden; margin: 6px 0; }
+.progress-fill { height: 100%; background: var(--accent); transition: width .2s ease; }
+.progress.indeterminate .progress-fill { width: 30%; animation: slide 1.1s ease-in-out infinite; }
+@keyframes slide { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
+.collab-progress { padding: 12px 14px; border-bottom: 1px solid var(--border); }
+
+@media (prefers-reduced-motion: reduce) {
+  .spinner, .pill.pending, .progress.indeterminate .progress-fill { animation-duration: 3s; }
+  .progress-fill { transition: none; }
+}
 
 @media (max-width: 960px) {
   .sync-layout { grid-template-columns: 1fr; }

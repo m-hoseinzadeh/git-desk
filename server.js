@@ -23,9 +23,10 @@ git.setGithubToken(process.env.GITHUB_TOKEN);
 const cache = {
   user: null,
   accountRepos: null,
-  collaborators: null,
-  collaboratorsLoading: null,
+  accountLoading: null,
+  collabRun: null,
   scanned: null,
+  scanning: null,
   reposById: new Map()
 };
 
@@ -46,17 +47,28 @@ async function getUser() {
 }
 
 async function getAccountRepos(refresh = false) {
-  if (!cache.accountRepos || refresh) {
-    cache.accountRepos = await requireClient().getRepositories();
+  if (cache.accountRepos && !refresh) return cache.accountRepos;
+  // Share one in-flight load between concurrent requests
+  if (!cache.accountLoading) {
+    cache.accountLoading = requireClient().getRepositories()
+      .then(repos => (cache.accountRepos = repos))
+      .finally(() => { cache.accountLoading = null; });
   }
-  return cache.accountRepos;
+  return cache.accountLoading;
 }
 
 function repoId(repoPath) {
   return crypto.createHash('sha1').update(repoPath).digest('hex').slice(0, 12);
 }
 
-async function rescan() {
+function rescan() {
+  if (!cache.scanning) {
+    cache.scanning = doRescan().finally(() => { cache.scanning = null; });
+  }
+  return cache.scanning;
+}
+
+async function doRescan() {
   const scanned = await scan(SCAN_ROOT, { maxDepth: SCAN_DEPTH });
   cache.reposById = new Map();
   for (const repo of scanned) {
@@ -119,7 +131,7 @@ async function summariesFor(repo) {
   return summaries;
 }
 
-function localView(repo, statusById) {
+function localView(repo) {
   return {
     id: repo.id,
     name: repo.name,
@@ -128,39 +140,20 @@ function localView(repo, statusById) {
     remoteUrl: repo.remoteUrl,
     fullName: repo.fullName,
     isWorktree: repo.isWorktree,
-    status: statusById.get(repo.id) || null,
+    status: null,
     worktrees: []
   };
 }
 
 /**
- * Match scanned local repos to account repos and group worktrees under their main repo
+ * Local repositories, with worktrees nested under the main checkout that shares their git directory
  */
-async function buildSyncView({ rescanDisk = false, refreshAccount = false } = {}) {
-  if (!cache.scanned || rescanDisk) {
-    await rescan();
-  }
-  const scanned = cache.scanned;
-
-  let accountRepos = [];
-  let accountError = null;
-  try {
-    accountRepos = await getAccountRepos(refreshAccount);
-  } catch (error) {
-    accountError = error.message;
-  }
-
-  const statusById = new Map();
-  await mapLimit(scanned, 8, async repo => {
-    statusById.set(repo.id, await repoSummary(repo));
-  });
-
-  // Group worktrees under the main checkout that shares their git directory
+function localTree(scanned) {
   const mainByCommonDir = new Map();
   for (const repo of scanned) {
     if (!repo.isWorktree && !repo.error) mainByCommonDir.set(repo.commonDir, repo);
   }
-  const views = new Map(scanned.map(repo => [repo.id, localView(repo, statusById)]));
+  const views = new Map(scanned.map(repo => [repo.id, localView(repo)]));
   const topLevel = [];
   for (const repo of scanned) {
     const main = repo.isWorktree ? mainByCommonDir.get(repo.commonDir) : null;
@@ -170,40 +163,19 @@ async function buildSyncView({ rescanDisk = false, refreshAccount = false } = {}
       topLevel.push(views.get(repo.id));
     }
   }
+  return topLevel;
+}
 
-  const accountByName = new Map(accountRepos.map(r => [r.full_name.toLowerCase(), r]));
-  const localsByName = new Map();
-  const localOnly = [];
-  for (const view of topLevel) {
-    if (view.fullName && accountByName.has(view.fullName)) {
-      if (!localsByName.has(view.fullName)) localsByName.set(view.fullName, []);
-      localsByName.get(view.fullName).push(view);
-    } else {
-      localOnly.push(view);
-    }
-  }
-
-  const matched = [];
-  const notCloned = [];
-  for (const repo of accountRepos) {
-    const account = {
-      fullName: repo.full_name,
-      name: repo.name,
-      owner: repo.owner.login,
-      private: repo.private,
-      url: repo.html_url,
-      defaultBranch: repo.default_branch,
-      pushedAt: repo.pushed_at
-    };
-    const locals = localsByName.get(repo.full_name.toLowerCase());
-    if (locals) {
-      matched.push({ ...account, locals });
-    } else {
-      notCloned.push(account);
-    }
-  }
-
-  return { scanRoot: SCAN_ROOT, accountError, matched, notCloned, localOnly };
+function accountView(repo) {
+  return {
+    fullName: repo.full_name,
+    name: repo.name,
+    owner: repo.owner.login,
+    private: repo.private,
+    url: repo.html_url,
+    defaultBranch: repo.default_branch,
+    pushedAt: repo.pushed_at
+  };
 }
 
 async function repoDetail(repo) {
@@ -322,33 +294,119 @@ const actions = {
 };
 
 /**
- * Fetch every scanned git directory once (worktrees share objects with their main repo)
+ * Scanned checkouts grouped by git directory. Worktrees share objects and refs with
+ * their main repo, so one fetch covers the whole group.
  */
-async function fetchAll() {
-  if (!cache.scanned) await rescan();
-  const seen = new Set();
-  const targets = cache.scanned.filter(repo => {
-    if (repo.error || seen.has(repo.commonDir)) return false;
-    seen.add(repo.commonDir);
-    return Object.keys(repo.remotes).length > 0;
-  });
-  return mapLimit(targets, 4, async repo => {
-    try {
-      await git.fetch(repo.path);
-      return { id: repo.id, relPath: repo.relPath, ok: true };
-    } catch (error) {
-      return { id: repo.id, relPath: repo.relPath, ok: false, error: error.message };
-    }
-  });
+function remoteGroups() {
+  const groups = new Map();
+  for (const repo of cache.scanned) {
+    if (repo.error || Object.keys(repo.remotes).length === 0) continue;
+    if (!groups.has(repo.commonDir)) groups.set(repo.commonDir, []);
+    groups.get(repo.commonDir).push(repo);
+  }
+  return [...groups.values()].map(group => ({
+    target: group.find(repo => !repo.isWorktree) || group[0],
+    checkouts: group
+  }));
 }
 
-async function loadCollaborators(refresh) {
-  const user = await getUser();
-  const repos = await getAccountRepos(refresh);
-  const result = await buildCollaboratorTable(client, repos, user.login);
-  // Don't keep an incomplete table around: the next request retries the failed repos
-  cache.collaborators = result.failed.length === 0 ? result : null;
-  return result;
+async function fetchGroup(group, stream) {
+  stream.send({ type: 'begin', id: group.target.id });
+  try {
+    await git.fetch(group.target.path);
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error.message };
+  }
+}
+
+/**
+ * Fast-forward a checkout that is behind its upstream and has no local commits or changes.
+ * Returns what happened, or null when there was nothing to pull.
+ */
+async function pullIfClean(repo) {
+  const summary = await repoSummary(repo);
+  if (summary.error || !summary.upstream || summary.behind === 0) return null;
+  if (summary.ahead > 0) {
+    return { kind: 'skipped', relPath: repo.relPath, reason: `diverged (↑${summary.ahead} ↓${summary.behind})` };
+  }
+  if (summary.changes > 0) {
+    return { kind: 'skipped', relPath: repo.relPath, reason: 'uncommitted changes' };
+  }
+  try {
+    await git.pull(repo.path, 'ff-only');
+    return { kind: 'pulled', relPath: repo.relPath, commits: summary.behind };
+  } catch (error) {
+    return { kind: 'failed', relPath: repo.relPath, error: error.message };
+  }
+}
+
+/**
+ * Collaborator loads run once and are shared: a later request (another tab, a page reload)
+ * replays the events so far and then follows along. A finished run without failures is the cache.
+ */
+function collaboratorRun(refresh) {
+  const current = cache.collabRun;
+  if (current && (!current.finished || (!refresh && current.complete))) return current;
+
+  const run = { events: [], listeners: new Set(), finished: false, complete: false };
+  const emit = event => {
+    run.events.push(event);
+    run.listeners.forEach(listener => listener(event));
+  };
+  cache.collabRun = run;
+
+  (async () => {
+    try {
+      const user = await getUser();
+      const repos = await getAccountRepos(refresh);
+      emit({ type: 'start', total: repos.length });
+      const { failed } = await buildCollaboratorTable(client, repos, user.login, {
+        concurrency: 6,
+        onResult: ({ index, repo, row, failed: didFail }) => {
+          emit({ type: 'result', index, row, failed: didFail ? repo.full_name : null });
+        }
+      });
+      run.complete = failed.length === 0;
+    } catch (error) {
+      emit({ type: 'error', error: error.message });
+    }
+    run.finished = true;
+    emit({ type: 'done' });
+  })();
+
+  return run;
+}
+
+/**
+ * Stream newline-delimited JSON events while the work runs, so the UI can show
+ * each result as soon as it is ready instead of waiting for the slowest one.
+ */
+function streamRoute(handler) {
+  return async (req, res) => {
+    let closed = false;
+    const closeListeners = [];
+    res.on('close', () => {
+      closed = true;
+      closeListeners.forEach(fn => fn());
+    });
+    res.set({ 'Content-Type': 'application/x-ndjson; charset=utf-8', 'Cache-Control': 'no-store' });
+    res.flushHeaders();
+
+    const stream = {
+      get closed() { return closed; },
+      onClose(fn) { closeListeners.push(fn); },
+      send(event) {
+        if (!closed) res.write(`${JSON.stringify(event)}\n`);
+      }
+    };
+    try {
+      await handler(req, stream);
+    } catch (error) {
+      stream.send({ type: 'error', error: error.message });
+    }
+    res.end();
+  };
 }
 
 const app = express();
@@ -382,63 +440,95 @@ app.get('/api/me', async (req, res) => {
   res.json({ login: user.login, avatarUrl: user.avatar_url, url: user.html_url, scanRoot: SCAN_ROOT });
 });
 
-app.get('/api/collaborators', async (req, res) => {
-  const refresh = req.query.refresh === '1';
-  if (cache.collaborators && !refresh) {
-    return res.json(cache.collaborators);
-  }
-  // Share one in-flight load between concurrent requests
-  if (!cache.collaboratorsLoading) {
-    cache.collaboratorsLoading = loadCollaborators(refresh).finally(() => {
-      cache.collaboratorsLoading = null;
-    });
-  }
-  res.json(await cache.collaboratorsLoading);
-});
-
-app.get('/api/sync', async (req, res) => {
-  res.json(await buildSyncView({
-    rescanDisk: req.query.rescan === '1',
-    refreshAccount: req.query.refresh === '1'
-  }));
-});
-
-app.post('/api/sync/fetch-all', async (req, res) => {
-  res.json({ results: await fetchAll() });
-});
+app.get('/api/collaborators', streamRoute(async (req, stream) => {
+  const run = collaboratorRun(req.query.refresh === '1');
+  run.events.forEach(event => stream.send(event));
+  if (run.finished) return;
+  await new Promise(resolve => {
+    const listener = event => {
+      stream.send(event);
+      if (event.type === 'done') stop();
+    };
+    const stop = () => {
+      run.listeners.delete(listener);
+      resolve();
+    };
+    run.listeners.add(listener);
+    stream.onClose(stop);
+  });
+}));
 
 /**
- * Fetch everything, then fast-forward every checkout that is behind its upstream,
- * has no local commits and no uncommitted changes. Anything else is reported as skipped.
+ * Sync view as a stream: the account repos (as soon as GitHub answers), the local
+ * repositories (cached first, then after the disk scan), then one status per repository.
+ * The client matches local clones to account repos.
  */
-app.post('/api/sync/pull-all', async (req, res) => {
-  const fetched = await fetchAll();
-  const fetchFailed = fetched.filter(r => !r.ok);
-  const failedDirs = new Set(fetchFailed.map(r => getRepo(r.id).commonDir));
+app.get('/api/sync', streamRoute(async (req, stream) => {
+  const accountSent = getAccountRepos(req.query.refresh === '1').then(
+    repos => stream.send({ type: 'account', repos: repos.map(accountView) }),
+    error => stream.send({ type: 'account', error: error.message })
+  );
 
-  const pulled = [];
-  const skipped = [];
-  const failed = fetchFailed.map(r => ({ relPath: r.relPath, error: `fetch: ${r.error}` }));
+  // Show the last scan right away; a rescan sends the list again (the client ignores it if unchanged)
+  const sendLocals = () => stream.send({ type: 'locals', scanRoot: SCAN_ROOT, locals: localTree(cache.scanned) });
+  if (cache.scanned) sendLocals();
+  if (!cache.scanned || req.query.rescan === '1') {
+    await rescan();
+    sendLocals();
+  }
+  const scanned = cache.scanned;
 
-  await mapLimit(cache.scanned.filter(r => !r.error && !failedDirs.has(r.commonDir)), 4, async repo => {
-    const summary = await repoSummary(repo);
-    if (summary.error || !summary.upstream || summary.behind === 0) return;
-    if (summary.ahead > 0) {
-      skipped.push({ relPath: repo.relPath, reason: `diverged (↑${summary.ahead} ↓${summary.behind})` });
-    } else if (summary.changes > 0) {
-      skipped.push({ relPath: repo.relPath, reason: 'uncommitted changes' });
+  await mapLimit(scanned, 8, async repo => {
+    if (stream.closed) return;
+    stream.send({ type: 'status', id: repo.id, status: await repoSummary(repo) });
+  });
+  await accountSent;
+  stream.send({ type: 'done' });
+}));
+
+app.post('/api/sync/fetch-all', streamRoute(async (req, stream) => {
+  if (!cache.scanned) await rescan();
+  const groups = remoteGroups();
+  stream.send({ type: 'start', total: groups.length });
+  await mapLimit(groups, 4, async group => {
+    if (stream.closed) return;
+    const result = await fetchGroup(group, stream);
+    stream.send({
+      type: 'fetched',
+      id: group.target.id,
+      relPath: group.target.relPath,
+      ...result,
+      summaries: await summariesFor(group.target)
+    });
+  });
+  stream.send({ type: 'done' });
+}));
+
+/**
+ * Fetch each git directory, then fast-forward its checkouts that are behind their upstream
+ * and have no local commits or changes. Anything else is reported as skipped.
+ */
+app.post('/api/sync/pull-all', streamRoute(async (req, stream) => {
+  if (!cache.scanned) await rescan();
+  const groups = remoteGroups();
+  stream.send({ type: 'start', total: groups.length });
+  await mapLimit(groups, 4, async group => {
+    if (stream.closed) return;
+    const fetched = await fetchGroup(group, stream);
+    const results = [];
+    if (!fetched.ok) {
+      results.push({ kind: 'failed', relPath: group.target.relPath, error: `fetch: ${fetched.error}` });
     } else {
-      try {
-        await git.pull(repo.path, 'ff-only');
-        pulled.push({ relPath: repo.relPath, commits: summary.behind });
-      } catch (error) {
-        failed.push({ relPath: repo.relPath, error: error.message });
+      // One checkout at a time: worktrees of a group share refs and lock files
+      for (const repo of group.checkouts) {
+        const result = await pullIfClean(repo);
+        if (result) results.push(result);
       }
     }
+    stream.send({ type: 'group', id: group.target.id, results, summaries: await summariesFor(group.target) });
   });
-
-  res.json({ pulled, skipped, failed });
-});
+  stream.send({ type: 'done' });
+}));
 
 app.get('/api/repo/status', async (req, res) => {
   res.json(await repoDetail(getRepo(req.query.id)));
