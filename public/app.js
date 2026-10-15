@@ -37,6 +37,44 @@ const state = {
 
 // ---------- helpers ----------
 
+// Remotes picked for pull and push, per repository: { pull, push }. A missing key means
+// git's default (the upstream's remote, or the push remote from git config).
+function remoteChoice(id) {
+  try {
+    return JSON.parse(readSetting(`remotes:${id}`, '{}'));
+  } catch {
+    return {};
+  }
+}
+
+function saveRemoteChoice(id, choice) {
+  writeSetting(`remotes:${id}`, JSON.stringify(choice));
+  scheduleRows([id]); // The row's Pull and Push buttons use the choice too
+}
+
+function setRemoteChoice(id, kind, remote, defaultRemote) {
+  const choice = remoteChoice(id);
+  if (remote === defaultRemote) delete choice[kind];
+  else choice[kind] = remote;
+  saveRemoteChoice(id, choice);
+}
+
+/**
+ * Forget picks of remotes that no longer exist, so the row buttons don't send them
+ */
+function pruneRemoteChoice(detail) {
+  const choice = remoteChoice(detail.id);
+  const names = new Set(detail.remotes.map(r => r.name));
+  const stale = ['pull', 'push'].filter(kind => choice[kind] && !names.has(choice[kind]));
+  if (stale.length === 0) return;
+  stale.forEach(kind => delete choice[kind]);
+  saveRemoteChoice(detail.id, choice);
+}
+
+function remoteBody(remote) {
+  return remote ? { remote } : {};
+}
+
 function emptyDrafts() {
   return { commit: '', branch: '', stash: '', remoteName: '', remoteUrl: '' };
 }
@@ -347,6 +385,7 @@ async function loadDetail(id) {
   try {
     const detail = await api(`/api/repo/status?id=${encodeURIComponent(id)}`);
     if (seq !== state.detailSeq || id !== state.selectedId) return;
+    pruneRemoteChoice(detail);
     const unchanged = JSON.stringify(detail) === JSON.stringify(state.detail);
     state.detail = detail;
     await refreshSelectedFileDiff();
@@ -409,7 +448,9 @@ async function loadDiff() {
  * Apply a fresh detail (from an action response) if it belongs to the selected repository
  */
 async function applyDetail(id, detail) {
-  if (!detail || id !== state.selectedId) return;
+  if (!detail) return;
+  pruneRemoteChoice(detail);
+  if (id !== state.selectedId) return;
   state.detailSeq++; // Invalidate any slower in-flight loadDetail
   state.detail = detail;
   await refreshSelectedFileDiff();
@@ -651,18 +692,20 @@ function statusPills(local) {
 
 function rowActions(local) {
   const stop = fn => event => { event.stopPropagation(); fn(); };
+  const choice = remoteChoice(local.id);
+  const pullTitle = PULL_MODES.find(([mode]) => mode === state.pullMode)[1];
   return [
     h('button', {
       class: 'btn small',
-      title: PULL_MODES.find(([mode]) => mode === state.pullMode)[1],
+      title: choice.pull ? `${pullTitle} from ${choice.pull}` : pullTitle,
       disabled: state.busy.has(`${local.id}:pull`),
-      onclick: stop(() => runAction(local.id, 'pull', { mode: state.pullMode }))
+      onclick: stop(() => runAction(local.id, 'pull', { mode: state.pullMode, ...remoteBody(choice.pull) }))
     }, busyLabel(`${local.id}:pull`, 'Pull')),
     h('button', {
       class: 'btn small',
-      title: 'git push',
+      title: choice.push ? `git push ${choice.push}` : 'git push',
       disabled: state.busy.has(`${local.id}:push`),
-      onclick: stop(() => runAction(local.id, 'push'))
+      onclick: stop(() => runAction(local.id, 'push', remoteBody(choice.push)))
     }, busyLabel(`${local.id}:push`, 'Push'))
   ];
 }
@@ -1123,14 +1166,21 @@ function buildDetail(d) {
     }
   }, PULL_MODES.map(([mode, label]) => h('option', { value: mode, selected: mode === state.pullMode }, label)));
 
-  const diverged = st.upstream && st.ahead > 0 && st.behind > 0;
+  // With several remotes the pickers choose where pull and push go; with one, git decides
+  const pickRemotes = d.remotes.length > 1 && st.branch;
+  const pullRemote = pickRemotes ? effectiveRemote(d, 'pull') : null;
+  const pushRemote = pickRemotes ? effectiveRemote(d, 'push') : null;
+  const pushTarget = pushRemote
+    ? d.remoteTracking.branches[pushRemote]
+    : st.upstream && { ref: st.upstream, ahead: st.ahead, behind: st.behind };
+  const diverged = pushTarget && pushTarget.ahead > 0 && pushTarget.behind > 0;
   const forcePush = diverged && h('button', {
     class: 'btn danger',
-    title: 'git push --force-with-lease',
+    title: `git push --force-with-lease${pushRemote ? ` ${pushRemote}` : ''}`,
     disabled: state.busy.has(`${id}:push`),
     onclick: () => {
-      if (confirm(`Force push ${st.branch}? This replaces ${st.behind} commit(s) on ${st.upstream} with your local history.`)) {
-        runAction(id, 'push', { force: true });
+      if (confirm(`Force push ${st.branch}? This replaces ${pushTarget.behind} commit(s) on ${pushTarget.ref} with your local history.`)) {
+        runAction(id, 'push', { force: true, ...remoteBody(pushRemote) });
       }
     }
   }, 'Force push');
@@ -1169,8 +1219,10 @@ function buildDetail(d) {
       h('div', { class: 'spacer' }),
       actionButton('fetch', 'Fetch'),
       pullMode,
-      actionButton('pull', 'Pull', { mode: state.pullMode }),
-      actionButton('push', 'Push', {}, 'primary'),
+      remoteSelect(d, 'pull'),
+      actionButton('pull', 'Pull', { mode: state.pullMode, ...remoteBody(pullRemote) }),
+      remoteSelect(d, 'push'),
+      actionButton('push', 'Push', remoteBody(pushRemote), 'primary'),
       forcePush
     ),
     d.operation && h('div', { class: 'block operation' },
@@ -1301,7 +1353,13 @@ async function saveRemote(id, remote) {
   let name = remote.name;
   const newName = edit.newName.trim();
   if (newName && newName !== name) {
+    const choice = remoteChoice(id);
     if (!(await runAction(id, 'remote-rename', { name, newName }))) return;
+    // Keep pull/push picks of the renamed remote
+    for (const kind of ['pull', 'push']) {
+      if (choice[kind] === name) choice[kind] = newName;
+    }
+    saveRemoteChoice(id, choice);
     name = newName;
     edit.name = newName; // Keep the edit row open while the URLs are saved
   }
@@ -1320,6 +1378,43 @@ async function saveRemote(id, remote) {
 // `git remote -v` shows the fetch URL as push URL when none is set
 function separatePushUrl(remote) {
   return remote.pushUrl && remote.pushUrl !== remote.fetchUrl ? remote.pushUrl : '';
+}
+
+/**
+ * The remote to pull from or push to: the user's pick, else git's default, else origin
+ */
+function effectiveRemote(d, kind) {
+  const names = d.remotes.map(r => r.name);
+  const picked = remoteChoice(d.id)[kind];
+  if (picked && names.includes(picked)) return picked;
+  const fallback = d.remoteTracking.defaults[kind];
+  if (fallback && names.includes(fallback)) return fallback;
+  return names.includes('origin') ? 'origin' : names[0] || null;
+}
+
+/**
+ * Pick the remote for pull or push. Only shown with more than one remote; each option
+ * shows how the branch compares to that remote's copy.
+ */
+function remoteSelect(d, kind) {
+  if (d.remotes.length < 2 || !d.status.branch) return null;
+  const selected = effectiveRemote(d, kind);
+  const fallback = d.remoteTracking.defaults[kind];
+  const prefix = kind === 'pull' ? 'from' : 'to';
+  const label = name => {
+    const branch = d.remoteTracking.branches[name];
+    const tag = name === fallback ? ' (default)' : '';
+    if (branch) return `${prefix} ${branch.ref} ↑${branch.ahead} ↓${branch.behind}${tag}`;
+    return `${prefix} ${name}${kind === 'push' ? ' (new branch)' : ` (no ${d.status.branch})`}${tag}`;
+  };
+  return h('select', {
+    id: `${kind}-remote`,
+    title: kind === 'pull' ? 'Remote to pull from' : 'Remote to push to',
+    onchange: event => {
+      setRemoteChoice(d.id, kind, event.target.value, fallback);
+      renderDetail();
+    }
+  }, d.remotes.map(r => h('option', { value: r.name, selected: r.name === selected }, label(r.name))));
 }
 
 function remoteInput(id, placeholder, value, onInput, onEnter) {

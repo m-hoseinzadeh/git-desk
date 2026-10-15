@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A Node.js app with a local web UI (plus the original CLI) that:
 - shows collaborators on the authenticated user's GitHub repositories
-- **syncs** local clones: it scans the parent directory for git repos, matches them to account repos, and offers fetch/pull/push/stage/discard/commit/amend/stash/branch/diff/clone, remote management (add/rename/set URL and push URL/remove, fetch one remote), merge/rebase abort/continue, and fetch-all/pull-all.
+- **syncs** local clones: it scans the parent directory for git repos, matches them to account repos, and offers fetch/pull/push/stage/discard/commit/amend/stash/branch/diff/clone, remote management (add/rename/set URL and push URL/remove, fetch one remote), a selectable pull/push remote per repo (remembered in localStorage; defaults to what plain `git pull`/`git push` would use), merge/rebase abort/continue, and fetch-all/pull-all.
 
 ## Commands
 

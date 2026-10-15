@@ -273,6 +273,8 @@ main { padding: 16px 20px 40px; }
   max-width: 220px;
 }
 
+.detail-bar #pull-remote, .detail-bar #push-remote { max-width: 300px; }
+
 .block { padding: 12px 16px; border-bottom: 1px solid var(--border); }
 .block:last-child { border-bottom: 0; }
 .block-title {

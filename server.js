@@ -209,6 +209,7 @@ async function repoDetail(repo) {
     git.operationInProgress(repo.path),
     git.remoteList(repo.path)
   ]);
+  const remoteTracking = await git.remoteTracking(repo.path, status, remotes.map(r => r.name));
   return {
     id: repo.id,
     name: repo.name,
@@ -223,7 +224,8 @@ async function repoDetail(repo) {
     stashes,
     lastMessage,
     operation,
-    remotes
+    remotes,
+    remoteTracking
   };
 }
 
@@ -296,10 +298,14 @@ async function discard(repo, body) {
   return git.discard(repo.path, files, untracked);
 }
 
+function optionalString(value) {
+  return value === undefined || value === null ? null : String(value);
+}
+
 const actions = {
-  fetch: (repo, body) => git.fetch(repo.path, body.remote === undefined ? null : String(body.remote)),
-  pull: (repo, body) => git.pull(repo.path, String(body.mode || 'default')),
-  push: (repo, body) => git.push(repo.path, { force: body.force === true }),
+  fetch: (repo, body) => git.fetch(repo.path, optionalString(body.remote)),
+  pull: (repo, body) => git.pull(repo.path, String(body.mode || 'default'), optionalString(body.remote)),
+  push: (repo, body) => git.push(repo.path, { force: body.force === true, remote: optionalString(body.remote) }),
   stage: (repo, body) => git.stage(repo.path, body.all ? null : repoPaths(repo, body.files)),
   unstage: (repo, body) => git.unstage(repo.path, body.all ? null : repoPaths(repo, body.files)),
   discard,
