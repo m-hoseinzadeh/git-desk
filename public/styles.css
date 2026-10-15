@@ -232,6 +232,25 @@ main { padding: 16px 20px 40px; }
 }
 .log li .btn { flex-shrink: 0; }
 
+.remotes li { align-items: baseline; padding: 3px 0; }
+.remotes .hash { flex-shrink: 0; }
+.remote-urls { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.remote-urls .subject { font-family: var(--mono); font-size: 12px; }
+.remote-buttons { display: flex; gap: 4px; flex-shrink: 0; }
+.remotes li.remote-edit { flex-wrap: wrap; align-items: center; }
+.remote-edit input, .remote-add input {
+  flex: 1;
+  min-width: 0;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+}
+.remote-edit #remote-edit-name, .remote-add #remote-name { flex: 0 0 110px; }
+.remote-edit #remote-edit-url, .remote-edit #remote-edit-pushurl { flex-basis: 100%; font-family: var(--mono); font-size: 12px; }
+.remote-edit .remote-buttons { margin-left: auto; }
+.remote-add { margin: 8px 0 0; }
+
 /* Detail panel */
 .detail-header { padding: 14px 16px; border-bottom: 1px solid var(--border); }
 .detail-header h2 { margin: 0 0 2px; font-size: 16px; }

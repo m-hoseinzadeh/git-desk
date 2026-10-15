@@ -73,15 +73,36 @@ async function doRescan() {
   cache.reposById = new Map();
   for (const repo of scanned) {
     repo.id = repoId(repo.path);
-    const githubRemote = repo.remotes.origin && normalize(repo.remotes.origin)
-      ? repo.remotes.origin
-      : Object.values(repo.remotes).find(url => normalize(url));
-    repo.remoteUrl = repo.remotes.origin || Object.values(repo.remotes)[0] || null;
-    repo.fullName = githubRemote ? normalize(githubRemote) : null;
+    applyRemotes(repo, repo.remotes);
     cache.reposById.set(repo.id, repo);
   }
   cache.scanned = scanned;
   return scanned;
+}
+
+/**
+ * Set a scanned repository's remotes and what is derived from them: the URL shown for it
+ * and the GitHub repository it is matched to (origin first, else the first GitHub remote)
+ */
+function applyRemotes(repo, remotes) {
+  repo.remotes = remotes;
+  const githubRemote = remotes.origin && normalize(remotes.origin)
+    ? remotes.origin
+    : Object.values(remotes).find(url => normalize(url));
+  repo.remoteUrl = remotes.origin || Object.values(remotes)[0] || null;
+  repo.fullName = githubRemote ? normalize(githubRemote) : null;
+}
+
+/**
+ * Re-read remotes after they changed. Remotes live in the shared config, so every
+ * checkout of the same git directory gets the new list.
+ */
+async function reloadRemotes(repo) {
+  const remotes = await git.remotes(repo.path);
+  for (const r of cache.scanned || []) {
+    if (r.commonDir === repo.commonDir && !r.error) applyRemotes(r, { ...remotes });
+  }
+  if (!(cache.scanned || []).includes(repo)) applyRemotes(repo, remotes);
 }
 
 function getRepo(id) {
@@ -179,13 +200,14 @@ function accountView(repo) {
 }
 
 async function repoDetail(repo) {
-  const [status, branches, log, stashes, lastMessage, operation] = await Promise.all([
+  const [status, branches, log, stashes, lastMessage, operation, remotes] = await Promise.all([
     git.status(repo.path),
     git.branches(repo.path),
     git.log(repo.path),
     git.stashList(repo.path),
     git.lastCommitMessage(repo.path),
-    git.operationInProgress(repo.path)
+    git.operationInProgress(repo.path),
+    git.remoteList(repo.path)
   ]);
   return {
     id: repo.id,
@@ -200,7 +222,8 @@ async function repoDetail(repo) {
     log,
     stashes,
     lastMessage,
-    operation
+    operation,
+    remotes
   };
 }
 
@@ -274,7 +297,7 @@ async function discard(repo, body) {
 }
 
 const actions = {
-  fetch: (repo) => git.fetch(repo.path),
+  fetch: (repo, body) => git.fetch(repo.path, body.remote === undefined ? null : String(body.remote)),
   pull: (repo, body) => git.pull(repo.path, String(body.mode || 'default')),
   push: (repo, body) => git.push(repo.path, { force: body.force === true }),
   stage: (repo, body) => git.stage(repo.path, body.all ? null : repoPaths(repo, body.files)),
@@ -290,8 +313,28 @@ const actions = {
   'stash-pop': (repo, body) => git.stashApply(repo.path, String(body.ref || ''), { pop: true }),
   'stash-drop': (repo, body) => git.stashDrop(repo.path, String(body.ref || '')),
   abort: (repo) => git.resolveOperation(repo.path, 'abort'),
-  continue: (repo) => git.resolveOperation(repo.path, 'continue')
+  continue: (repo) => git.resolveOperation(repo.path, 'continue'),
+  'remote-add': (repo, body) => git.addRemote(repo.path, String(body.name || ''), String(body.url || '').trim()),
+  'remote-rename': (repo, body) => git.renameRemote(repo.path, String(body.name || ''), String(body.newName || '')),
+  'remote-set-url': (repo, body) => git.setRemoteUrl(repo.path, String(body.name || ''), String(body.url || '').trim(), {
+    push: body.push === true
+  }),
+  'remote-remove': (repo, body) => git.removeRemote(repo.path, String(body.name || ''))
 };
+
+/**
+ * Fresh state to send after an action. Remote changes also change how repositories are
+ * matched to GitHub, so those send the local repository list too.
+ */
+async function actionState(repo, actionName) {
+  let locals;
+  if (actionName.startsWith('remote-')) {
+    await reloadRemotes(repo).catch(() => {});
+    locals = localTree(cache.scanned || []);
+  }
+  const [detail, summaries] = await Promise.all([repoDetail(repo).catch(() => null), summariesFor(repo)]);
+  return { detail, summaries, locals };
+}
 
 /**
  * Scanned checkouts grouped by git directory. Worktrees share objects and refs with
@@ -556,17 +599,12 @@ app.post('/api/repo/:action', async (req, res) => {
     result = await action(repo, body);
   } catch (error) {
     // A failed pull or checkout can still change the repo (e.g. conflicts), so send fresh state
-    [error.detail, error.summaries] = await Promise.all([
-      repoDetail(repo).catch(() => null),
-      summariesFor(repo)
-    ]);
+    Object.assign(error, await actionState(repo, req.params.action));
     throw error;
   }
-  const [detail, summaries] = await Promise.all([repoDetail(repo), summariesFor(repo)]);
   res.json({
     output: formatOutput(result),
-    detail,
-    summaries
+    ...(await actionState(repo, req.params.action))
   });
 });
 
@@ -592,7 +630,8 @@ app.use((err, req, res, next) => {
     stdout: err.stdout || undefined,
     stderr: err.stderr || undefined,
     detail: err.detail || undefined,
-    summaries: err.summaries || undefined
+    summaries: err.summaries || undefined,
+    locals: err.locals || undefined
   });
 });
 

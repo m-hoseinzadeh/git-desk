@@ -25,7 +25,8 @@ const state = {
   diffSeq: 0,
   output: null, // { text, error }
   bulk: null, // { kind, running, done, total, lines, counts, error }
-  drafts: { commit: '', branch: '', stash: '' },
+  drafts: emptyDrafts(),
+  remoteEdit: null, // { name, newName, url, pushUrl } while a remote is being edited
   amend: false,
   pullMode: readSetting('pullMode', 'default'),
   filter: '',
@@ -35,6 +36,10 @@ const state = {
 };
 
 // ---------- helpers ----------
+
+function emptyDrafts() {
+  return { commit: '', branch: '', stash: '', remoteName: '', remoteUrl: '' };
+}
 
 function readSetting(key, fallback) {
   try {
@@ -315,6 +320,13 @@ function setStatus(id, status) {
 }
 
 /**
+ * Apply the repository list sent after a remote change (its GitHub match may have changed)
+ */
+function applyLocals(locals) {
+  if (locals && setLocals(locals)) scheduleListRender();
+}
+
+/**
  * Apply statuses reported by an action or a bulk operation
  */
 function applySummaries(summaries) {
@@ -351,7 +363,8 @@ async function selectRepo(id) {
   if (state.selectedId !== id) {
     closeDiff();
     state.output = null;
-    state.drafts = { commit: '', branch: '', stash: '' };
+    state.drafts = emptyDrafts();
+    state.remoteEdit = null;
     state.amend = false;
     state.detail = null;
   }
@@ -410,6 +423,7 @@ async function runAction(id, action, body = {}) {
   return withBusy(`${id}:${action}`, async () => {
     try {
       const result = await api(`/api/repo/${action}`, { method: 'POST', body: { id, ...body } });
+      applyLocals(result.locals);
       applySummaries(result.summaries);
       await applyDetail(id, result.detail);
       if (id === state.selectedId) {
@@ -420,6 +434,7 @@ async function runAction(id, action, body = {}) {
       }
       return true;
     } catch (error) {
+      applyLocals(error.data?.locals);
       applySummaries(error.data?.summaries);
       await applyDetail(id, error.data?.detail);
       if (id === state.selectedId) {
@@ -1263,6 +1278,7 @@ function buildDetail(d) {
         }, 'Drop')
       )))
     ),
+    remotesBlock(d),
     h('div', { class: 'block' },
       h('div', { class: 'block-title' }, h('span', {}, 'Recent commits')),
       d.log.length === 0
@@ -1274,6 +1290,140 @@ function buildDetail(d) {
         )))
     )
   ];
+}
+
+/**
+ * Rename, change the URL and change the push URL of a remote, as separate git commands.
+ * Stops at the first one that fails.
+ */
+async function saveRemote(id, remote) {
+  const edit = state.remoteEdit;
+  let name = remote.name;
+  const newName = edit.newName.trim();
+  if (newName && newName !== name) {
+    if (!(await runAction(id, 'remote-rename', { name, newName }))) return;
+    name = newName;
+    edit.name = newName; // Keep the edit row open while the URLs are saved
+  }
+  const url = edit.url.trim();
+  if (url && url !== remote.fetchUrl) {
+    if (!(await runAction(id, 'remote-set-url', { name, url }))) return;
+  }
+  const pushUrl = edit.pushUrl.trim();
+  if (pushUrl !== separatePushUrl(remote)) {
+    if (!(await runAction(id, 'remote-set-url', { name, url: pushUrl, push: true }))) return;
+  }
+  state.remoteEdit = null;
+  renderDetail();
+}
+
+// `git remote -v` shows the fetch URL as push URL when none is set
+function separatePushUrl(remote) {
+  return remote.pushUrl && remote.pushUrl !== remote.fetchUrl ? remote.pushUrl : '';
+}
+
+function remoteInput(id, placeholder, value, onInput, onEnter) {
+  return h('input', {
+    id,
+    placeholder,
+    value,
+    list: id.endsWith('url') ? 'remote-url-suggestions' : null,
+    autocomplete: 'off',
+    spellcheck: 'false',
+    oninput: event => onInput(event.target.value),
+    onkeydown: event => { if (event.key === 'Enter') onEnter(); }
+  });
+}
+
+function remoteEditRow(id, remote) {
+  const edit = state.remoteEdit;
+  const busy = state.busy.has(`${id}:remote-rename`) || state.busy.has(`${id}:remote-set-url`);
+  const save = () => saveRemote(id, remote);
+  return h('li', { class: 'remote-edit' },
+    remoteInput('remote-edit-name', 'name', edit.newName, v => { edit.newName = v; }, save),
+    h('div', { class: 'remote-buttons' },
+      h('button', { class: 'btn small', onclick: () => { state.remoteEdit = null; renderDetail(); } }, 'Cancel'),
+      h('button', { class: 'btn small primary', disabled: busy, onclick: save },
+        busy ? [h('span', { class: 'spinner' }), ' Save'] : 'Save')
+    ),
+    remoteInput('remote-edit-url', 'fetch URL', edit.url, v => { edit.url = v; }, save),
+    remoteInput('remote-edit-pushurl', 'push URL (same as fetch URL)', edit.pushUrl, v => { edit.pushUrl = v; }, save)
+  );
+}
+
+function remoteRow(id, remote) {
+  const pushUrl = separatePushUrl(remote);
+  return h('li', { class: 'remote' },
+    h('span', { class: 'hash' }, remote.name),
+    h('div', { class: 'remote-urls' },
+      h('span', { class: 'subject', title: remote.fetchUrl || '' }, remote.fetchUrl || '(no URL)'),
+      pushUrl && h('span', { class: 'subject muted', title: pushUrl }, `push: ${pushUrl}`)
+    ),
+    h('div', { class: 'remote-buttons' },
+      h('button', {
+        class: 'btn small',
+        title: `git fetch --prune ${remote.name}`,
+        disabled: state.busy.has(`${id}:fetch`),
+        onclick: () => runAction(id, 'fetch', { remote: remote.name })
+      }, 'Fetch'),
+      h('button', {
+        class: 'btn small',
+        onclick: () => {
+          state.remoteEdit = { name: remote.name, newName: remote.name, url: remote.fetchUrl || '', pushUrl };
+          renderDetail();
+        }
+      }, 'Edit'),
+      h('button', {
+        class: 'btn small danger',
+        disabled: state.busy.has(`${id}:remote-remove`),
+        onclick: () => {
+          if (confirm(`Remove remote ${remote.name}? Its remote-tracking branches and the upstream settings that point to it are removed too.`)) {
+            runAction(id, 'remote-remove', { name: remote.name });
+          }
+        }
+      }, 'Remove')
+    )
+  );
+}
+
+function remotesBlock(d) {
+  const id = d.id;
+  const editing = state.remoteEdit && d.remotes.find(r => r.name === state.remoteEdit.name);
+  const add = async () => {
+    const name = state.drafts.remoteName.trim();
+    const url = state.drafts.remoteUrl.trim();
+    if (!name || !url) {
+      toast('Enter a name and a URL for the remote', true);
+      return;
+    }
+    if (await runAction(id, 'remote-add', { name, url })) {
+      state.drafts.remoteName = '';
+      state.drafts.remoteUrl = '';
+      renderDetail();
+    }
+  };
+  // Suggest the account's repositories, e.g. to add a fork or the original as a second remote
+  const suggestions = (state.account?.repos || []).map(r => h('option', { value: `https://github.com/${r.fullName}.git` }));
+
+  return h('div', { class: 'block' },
+    h('div', { class: 'block-title' },
+      h('span', {}, 'Remotes', h('span', { class: 'count' }, d.remotes.length))
+    ),
+    d.remotes.length === 0
+      ? h('div', { class: 'file-none' }, 'No remotes. Add one to push and pull.')
+      : h('ul', { class: 'log remotes' }, d.remotes.map(r => (editing === r ? remoteEditRow(id, r) : remoteRow(id, r)))),
+    h('div', { class: 'stash-row remote-add' },
+      remoteInput('remote-name', d.remotes.length === 0 ? 'origin' : 'name', state.drafts.remoteName,
+        v => { state.drafts.remoteName = v; }, add),
+      remoteInput('remote-url', 'URL', state.drafts.remoteUrl, v => { state.drafts.remoteUrl = v; }, add),
+      h('button', {
+        class: 'btn small',
+        disabled: state.busy.has(`${id}:remote-add`),
+        onclick: add
+      }, busyLabel(`${id}:remote-add`, 'Add remote'))
+    ),
+    suggestions.length > 0 && h('datalist', { id: 'remote-url-suggestions' }, suggestions)
+  );
 }
 
 function renderToolbar() {
