@@ -213,8 +213,20 @@ function busyLabel(key, label) {
   return state.busy.has(key) ? [h('span', { class: 'spinner' }), ' ', label] : label;
 }
 
-function firstLine(text) {
-  return String(text || '').split('\n')[0];
+/**
+ * The line of a git error that says what went wrong: the app's hint, else git's fatal,
+ * rejected or error line, else the first line that isn't progress ("From …", "To …") or advice
+ */
+function errorSummary(message) {
+  const text = String(message || '');
+  const hint = text.match(/\n\nHint: (.+)/);
+  if (hint) return hint[1];
+  const lines = text.split('\n').map(line => line.trim()).filter(Boolean);
+  const fatal = lines.find(line => /^fatal:/i.test(line)) ||
+    lines.find(line => /^! \[(remote )?rejected\]/.test(line)) ||
+    lines.find(line => /^error:/i.test(line));
+  if (fatal) return fatal.replace(/^(fatal|error):\s*/i, '');
+  return lines.find(line => !/^(From |To |hint:|remote:|[0-9a-f]+\.\.[0-9a-f]+ )/i.test(line)) || lines[0] || 'Unknown error';
 }
 
 function allLocals() {
@@ -480,10 +492,10 @@ async function runAction(id, action, body = {}) {
       await applyDetail(id, error.data?.detail);
       if (id === state.selectedId) {
         const details = [error.data?.stdout, error.data?.stderr].filter(Boolean).join('\n').trim();
-        const hint = error.message.includes('Hint:') ? `\n\n${error.message.slice(error.message.indexOf('Hint:'))}` : '';
-        state.output = { text: `$ git ${label}\n${details || error.message}${details ? hint : ''}`, error: true };
+        const hint = details && error.data?.hint ? `\n\nHint: ${error.data.hint}` : '';
+        state.output = { text: `$ git ${label}\n${details || error.message}${hint}`, error: true };
       }
-      toast(`${label} failed: ${firstLine(error.message)}`, true);
+      toast(`${label} failed: ${errorSummary(error.message)}`, true);
       return false;
     }
   });
@@ -515,7 +527,7 @@ async function cloneRepo(fullName) {
       toast(`Cloned into ${result.path}`);
       await loadSync();
     } catch (error) {
-      toast(`Clone failed: ${firstLine(error.message)}`, true);
+      toast(`Clone failed: ${errorSummary(error.message)}`, true);
     }
   });
 }
@@ -552,7 +564,7 @@ async function runBulk(kind) {
           finishRepo(event.id);
           if (!event.ok) {
             bulk.counts.failed++;
-            bulk.lines.push(`✗ ${event.relPath}: ${firstLine(event.error)}`);
+            bulk.lines.push(`✗ ${event.relPath}: ${errorSummary(event.error)}`);
           }
           applySummaries(event.summaries);
         } else if (event.type === 'group') {
@@ -585,7 +597,7 @@ function pullResultLine(result) {
     return `✓ ${result.relPath}: ${result.commits} new commit${result.commits === 1 ? '' : 's'}`;
   }
   if (result.kind === 'skipped') return `– ${result.relPath}: skipped, ${result.reason}`;
-  return `✗ ${result.relPath}: ${firstLine(result.error)}`;
+  return `✗ ${result.relPath}: ${errorSummary(result.error)}`;
 }
 
 /**

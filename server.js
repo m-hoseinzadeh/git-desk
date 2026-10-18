@@ -635,6 +635,7 @@ app.use((err, req, res, next) => {
     error: err.message,
     stdout: err.stdout || undefined,
     stderr: err.stderr || undefined,
+    hint: err.hint || undefined,
     detail: err.detail || undefined,
     summaries: err.summaries || undefined,
     locals: err.locals || undefined
