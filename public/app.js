@@ -771,23 +771,48 @@ function statusPills(local) {
   ];
 }
 
+/**
+ * Pull and Push for a list row. Buttons that can't do anything are disabled, with the
+ * reason in their tooltip.
+ */
 function rowActions(local) {
   const stop = fn => event => { event.stopPropagation(); fn(); };
   const choice = remoteChoice(local.id);
   const pullTitle = PULL_MODES.find(([mode]) => mode === state.pullMode)[1];
+  const status = local.status;
+  const busy = repoBusy(local.id);
+
+  let blocked = null; // Why neither button can work
+  if (!local.remoteUrl) blocked = 'No remote configured';
+  else if (status?.error) blocked = status.error;
+  else if (status && !status.branch) blocked = 'Detached HEAD: switch to a branch first';
+
+  let pushLabel = 'Push';
+  let pushTitle = choice.push ? `git push ${choice.push}` : 'git push';
+  let nothingToPush = false;
+  if (!blocked && status && !choice.push) {
+    if (!status.upstream) {
+      pushLabel = 'Publish';
+      pushTitle = `Push ${status.branch} and track it (no upstream yet)`;
+    } else if (status.ahead === 0) {
+      nothingToPush = true;
+      pushTitle = `Nothing to push: ${status.branch} has no commits that ${status.upstream} lacks`;
+    }
+  }
+
   return [
     h('button', {
       class: 'btn small',
-      title: choice.pull ? `${pullTitle} from ${choice.pull}` : pullTitle,
-      disabled: repoBusy(local.id),
+      title: blocked || (choice.pull ? `${pullTitle} from ${choice.pull}` : pullTitle),
+      disabled: busy || Boolean(blocked),
       onclick: stop(() => runAction(local.id, 'pull', { mode: state.pullMode, ...remoteBody(choice.pull) }))
     }, busyLabel(`${local.id}:pull`, 'Pull')),
     h('button', {
       class: 'btn small',
-      title: choice.push ? `git push ${choice.push}` : 'git push',
-      disabled: repoBusy(local.id),
+      title: blocked || pushTitle,
+      disabled: busy || Boolean(blocked) || nothingToPush,
       onclick: stop(() => runAction(local.id, 'push', remoteBody(choice.push)))
-    }, busyLabel(`${local.id}:push`, 'Push'))
+    }, busyLabel(`${local.id}:push`, pushLabel))
   ];
 }
 
