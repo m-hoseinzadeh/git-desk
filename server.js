@@ -269,13 +269,18 @@ async function repoDetail(repo) {
 }
 
 /**
- * Combine git's stdout and stderr for display, dropping terminal control sequences
+ * Combine git's stdout and stderr for display, dropping terminal control sequences.
+ * Progress redrawn with carriage returns ("Rebasing (1/1)\rSuccessfully rebased") keeps
+ * only its final state.
  */
 function formatOutput(result) {
   return [result.stdout, result.stderr]
     .filter(Boolean)
     .join('\n')
     .replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')
+    .split('\n')
+    .map(line => line.split('\r').filter(part => part.trim()).pop() || '')
+    .join('\n')
     .trim();
 }
 
@@ -685,8 +690,8 @@ app.use((err, req, res, next) => {
   const status = err.status || (err instanceof git.GitError ? 400 : err.response?.status || 500);
   res.status(status).json({
     error: err.message,
-    stdout: err.stdout || undefined,
-    stderr: err.stderr || undefined,
+    stdout: err.stdout ? formatOutput({ stdout: err.stdout }) : undefined,
+    stderr: err.stderr ? formatOutput({ stderr: err.stderr }) : undefined,
     hint: err.hint || undefined,
     reason: err.reason || undefined,
     detail: err.detail || undefined,

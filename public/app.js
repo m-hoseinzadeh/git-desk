@@ -494,8 +494,11 @@ async function applyDetail(id, detail) {
 /**
  * Run a git action on a repository, then refresh its detail and its list summary
  */
+const PULL_FLAGS = { 'ff-only': ' --ff-only', rebase: ' --rebase', merge: ' --no-rebase' };
+
 async function runAction(id, action, body = {}) {
-  const label = action.replace('-', ' ');
+  // Shown as "$ git <label>" above the output
+  const label = action.replace('-', ' ') + (action === 'pull' ? PULL_FLAGS[body.mode] || '' : '');
   if (repoBusy(id)) {
     toast(`${repoName(id)}: wait for the running action to finish`, true);
     return false;
