@@ -105,8 +105,17 @@ async function reloadRemotes(repo) {
   if (!(cache.scanned || []).includes(repo)) applyRemotes(repo, remotes);
 }
 
-function getRepo(id) {
-  const repo = cache.reposById.get(id);
+/**
+ * Look up a repository by scan id. An unknown id rescans once first: after a server restart
+ * the cache is empty while the page still lists repositories, and a repository may have
+ * appeared since the last scan.
+ */
+async function getRepo(id) {
+  let repo = cache.reposById.get(id);
+  if (!repo && id) {
+    await rescan();
+    repo = cache.reposById.get(id);
+  }
   if (!repo) {
     const error = new Error('Unknown repository. Try rescanning.');
     error.status = 404;
@@ -580,11 +589,11 @@ app.post('/api/sync/pull-all', streamRoute(async (req, stream) => {
 }));
 
 app.get('/api/repo/status', async (req, res) => {
-  res.json(await repoDetail(getRepo(req.query.id)));
+  res.json(await repoDetail(await getRepo(req.query.id)));
 });
 
 app.get('/api/repo/diff', async (req, res) => {
-  const repo = getRepo(req.query.id);
+  const repo = await getRepo(req.query.id);
   const file = String(req.query.file || '');
   if (!file) return res.status(400).json({ error: 'file is required' });
   const untracked = req.query.untracked === '1';
@@ -599,7 +608,7 @@ app.post('/api/repo/:action', async (req, res) => {
   const action = actions[req.params.action];
   if (!action) return res.status(404).json({ error: 'Unknown action' });
   const body = req.body || {};
-  const repo = getRepo(body.id);
+  const repo = await getRepo(body.id);
   let result;
   try {
     result = await action(repo, body);
