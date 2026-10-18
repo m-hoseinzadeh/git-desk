@@ -23,13 +23,13 @@ const state = {
   selectedFile: null, // { path, kind: 'staged' | 'unstaged' | 'untracked' | 'conflicted' }
   diff: null,
   diffSeq: 0,
-  outputs: {}, // id -> { text, error }: the last action's output per repository
+  outputs: {}, // id -> { text, error, retry }: the last action's output per repository
   revealOutput: null, // id whose new output should be scrolled into view on the next render
   bulk: null, // { kind, running, done, total, lines, counts, error }
   drafts: emptyDrafts(),
   remoteEdit: null, // { name, newName, url, pushUrl } while a remote is being edited
   amend: false,
-  pullMode: readSetting('pullMode', 'default'),
+  pullMode: PULL_MODES.some(([mode]) => mode === readSetting('pullMode')) ? readSetting('pullMode') : 'default',
   filter: '',
   viewFilter: 'all',
   busy: new Set(),
@@ -517,12 +517,33 @@ async function runAction(id, action, body = {}) {
       await applyDetail(id, error.data?.detail);
       const details = [error.data?.stdout, error.data?.stderr].filter(Boolean).join('\n').trim();
       const hint = details && error.data?.hint ? `\n\nHint: ${error.data.hint}` : '';
-      state.outputs[id] = { text: `$ git ${label}\n${details || error.message}${hint}`, error: true };
+      state.outputs[id] = {
+        text: `$ git ${label}\n${details || error.message}${hint}`,
+        error: true,
+        retry: retryChoices(action, body, error.data?.reason)
+      };
       if (id === state.selectedId) state.revealOutput = id;
       else toast(`${repoName(id)}: ${label} failed – ${errorSummary(error.message)}`, true);
       return false;
     }
   });
+}
+
+/**
+ * Next steps to offer as buttons after a pull or push failed for a known reason
+ */
+function retryChoices(action, body, reason) {
+  const remote = remoteBody(body.remote);
+  if (action === 'pull' && reason === 'diverged') {
+    return [
+      { label: 'Pull with rebase', action: 'pull', body: { ...remote, mode: 'rebase' } },
+      { label: 'Pull with merge', action: 'pull', body: { ...remote, mode: 'merge' } }
+    ];
+  }
+  if (action === 'push' && reason === 'rejected') {
+    return [{ label: 'Pull first', action: 'pull', body: { ...remote, mode: state.pullMode } }];
+  }
+  return null;
 }
 
 function repoName(id) {
@@ -1223,13 +1244,9 @@ function buildDetail(d) {
 
   const pullMode = h('select', {
     id: 'pull-mode',
-    title: 'How to integrate remote commits',
-    onchange: event => {
-      state.pullMode = event.target.value;
-      writeSetting('pullMode', state.pullMode);
-      scheduleListRender();
-    }
-  }, PULL_MODES.map(([mode, label]) => h('option', { value: mode, selected: mode === state.pullMode }, label)));
+    title: 'How to integrate remote commits (also used by the Pull buttons in the list)',
+    onchange: event => setPullMode(event.target.value)
+  }, pullModeOptions());
 
   // With several remotes the pickers choose where pull and push go; with one, git decides
   const pickRemotes = d.remotes.length > 1 && st.branch;
@@ -1294,7 +1311,13 @@ function buildDetail(d) {
     output && h('div', { class: 'block output-block' },
       h('div', { class: 'block-title' },
         h('span', {}, 'Output'),
-        h('button', { class: 'btn small', onclick: () => { delete state.outputs[id]; renderDetail(); } }, 'Clear')
+        h('div', { class: 'repo-actions' },
+          (output.retry || []).map(choice => h('button', {
+            class: 'btn small primary',
+            disabled: repoBusy(id),
+            onclick: () => runAction(id, choice.action, choice.body)
+          }, choice.label)),
+          h('button', { class: 'btn small', onclick: () => { delete state.outputs[id]; renderDetail(); } }, 'Clear'))
       ),
       logBox(output, output.text, output.error ? ' error' : '')
     ),
@@ -1587,6 +1610,21 @@ function remotesBlock(d) {
   );
 }
 
+function pullModeOptions() {
+  return PULL_MODES.map(([mode, label]) => h('option', { value: mode, selected: mode === state.pullMode }, label));
+}
+
+/**
+ * One pull mode for every Pull button; the toolbar and the detail panel both pick it
+ */
+function setPullMode(mode) {
+  state.pullMode = mode;
+  writeSetting('pullMode', mode);
+  document.getElementById('pull-mode-global').value = mode;
+  scheduleListRender(); // The list's Pull buttons show the mode in their tooltip
+  if (state.detail) renderDetail();
+}
+
 function renderToolbar() {
   const bulk = state.bulk;
   const progress = bulk?.running && bulk.total !== null ? ` ${bulk.done}/${bulk.total}` : '';
@@ -1627,6 +1665,10 @@ document.querySelectorAll('#view-filter .chip').forEach(chip => {
     renderRepoList();
   });
 });
+
+const globalPullMode = document.getElementById('pull-mode-global');
+globalPullMode.replaceChildren(...pullModeOptions());
+globalPullMode.addEventListener('change', event => setPullMode(event.target.value));
 
 document.getElementById('btn-rescan').addEventListener('click', () => withBusy('rescan', () => loadSync({ rescan: true })));
 document.getElementById('btn-refresh-account').addEventListener('click', () => withBusy('refresh', () => loadSync({ refresh: true })));
