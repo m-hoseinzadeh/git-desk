@@ -642,6 +642,9 @@ app.get('/api/repo/status', async (req, res) => {
   res.json(await repoDetail(await getRepo(req.query.id)));
 });
 
+// Longer diffs (lockfiles, generated files) are cut unless the client asks for all of it
+const MAX_DIFF_LINES = 5000;
+
 app.get('/api/repo/diff', async (req, res) => {
   const repo = await getRepo(req.query.id);
   const file = String(req.query.file || '');
@@ -651,7 +654,11 @@ app.get('/api/repo/diff', async (req, res) => {
   if (untracked) await realRepoPath(repo, file);
   else repoPaths(repo, [file]);
   const diff = await git.diff(repo.path, file, { staged: req.query.staged === '1', untracked });
-  res.json({ diff });
+  const lines = diff.replace(/\n$/, '').split('\n');
+  if (req.query.full !== '1' && lines.length > MAX_DIFF_LINES) {
+    return res.json({ diff: `${lines.slice(0, MAX_DIFF_LINES).join('\n')}\n`, totalLines: lines.length, truncated: true });
+  }
+  res.json({ diff, totalLines: lines.length, truncated: false });
 });
 
 app.post('/api/repo/:action', async (req, res) => {

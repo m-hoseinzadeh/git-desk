@@ -25,7 +25,9 @@ const state = {
   detailSeq: 0, // Bumped on every detail update so stale responses are ignored
   selectedFile: null, // { path, kind: 'staged' | 'unstaged' | 'untracked' | 'conflicted' }
   diff: null,
+  diffInfo: null, // { totalLines, truncated } of the loaded diff
   diffSeq: 0,
+  showAllFiles: new Set(), // File lists ('staged', 'unstaged', ...) shown in full despite their length
   outputs: {}, // id -> { text, error, retry }: the last action's output per repository
   revealOutput: null, // id whose new output should be scrolled into view on the next render
   bulk: null, // Shown bulk result: { kind, running, done, total, lines, counts, error }
@@ -116,8 +118,15 @@ function h(tag, attrs = {}, ...children) {
     else if (key === 'checked') el.checked = value;
     else el.setAttribute(key, value === true ? '' : value);
   }
-  el.append(...nodes(children));
+  appendAll(el, nodes(children));
   return el;
+}
+
+/**
+ * Append nodes in chunks: spreading a very long list as arguments overflows the call stack
+ */
+function appendAll(el, list) {
+  for (let i = 0; i < list.length; i += 10000) el.append(...list.slice(i, i + 10000));
 }
 
 /**
@@ -437,6 +446,7 @@ async function loadDetail(id) {
 async function selectRepo(id) {
   if (state.selectedId !== id) {
     closeDiff();
+    state.showAllFiles = new Set();
     state.drafts = emptyDrafts();
     state.remoteEdit = null;
     state.amend = false;
@@ -451,6 +461,7 @@ async function selectRepo(id) {
 function closeDiff() {
   state.selectedFile = null;
   state.diff = null;
+  state.diffInfo = null;
   state.diffSeq++;
 }
 
@@ -465,12 +476,14 @@ async function loadDiff() {
     id: state.detail.id,
     file: file.path,
     staged: file.kind === 'staged' ? '1' : '0',
-    untracked: file.kind === 'untracked' ? '1' : '0'
+    untracked: file.kind === 'untracked' ? '1' : '0',
+    full: file.full ? '1' : '0'
   });
   try {
-    const { diff } = await api(`/api/repo/diff?${params}`);
+    const { diff, totalLines, truncated } = await api(`/api/repo/diff?${params}`);
     if (seq !== state.diffSeq || diff === state.diff) return;
     state.diff = diff;
+    state.diffInfo = { totalLines, truncated };
   } catch (error) {
     if (seq !== state.diffSeq) return;
     state.diff = '';
@@ -1089,7 +1102,7 @@ function renderRepoList() {
 const STATUS_NAMES = { M: 'modified', A: 'added', D: 'deleted', R: 'renamed', C: 'copied', T: 'type changed', '?': 'untracked' };
 
 function selectFile(path, kind) {
-  state.selectedFile = { path, kind };
+  state.selectedFile = { path, kind, full: false };
   state.diff = null;
   renderDetail();
   loadDiff();
@@ -1127,8 +1140,19 @@ function discardFiles(id, files, untracked) {
   runAction(id, 'discard', { files, untracked });
 }
 
+// Longer file lists (e.g. an unignored build folder) show this many until "Show all"
+const MAX_FILES = 300;
+
 function fileList(files, kind, id) {
   if (files.length === 0) return h('div', { class: 'file-none' }, 'None');
+  const hidden = state.showAllFiles.has(kind) ? 0 : Math.max(0, files.length - MAX_FILES);
+  const more = hidden > 0 && h('div', { class: 'file-none' },
+    `… and ${hidden.toLocaleString()} more. `,
+    h('button', { class: 'btn small', onclick: () => { state.showAllFiles.add(kind); renderDetail(); } }, 'Show all'));
+  return h('div', {}, fileItems(hidden ? files.slice(0, MAX_FILES) : files, kind, id), more);
+}
+
+function fileItems(files, kind, id) {
   return h('ul', { class: 'file-list' }, files.map(file => {
     if (kind === 'staged') {
       return fileItem(file, kind, iconButton('−', 'Unstage', () => runAction(id, 'unstage', { files: [file.path] })));
@@ -1162,7 +1186,20 @@ function renderDiff() {
     else if (line.startsWith('-')) cls = 'del';
     return h('span', { class: cls }, line || ' ');
   });
-  return h('div', { class: 'block' }, title, h('pre', { class: 'diff', 'data-file': `${state.selectedFile.kind}:${state.selectedFile.path}` }, lines));
+  const info = state.diffInfo;
+  const cut = info?.truncated && h('div', { class: 'file-none' },
+    `Showing the first ${lines.length.toLocaleString()} of ${info.totalLines.toLocaleString()} lines. `,
+    h('button', {
+      class: 'btn small',
+      onclick: () => {
+        state.selectedFile.full = true;
+        state.diff = null;
+        renderDetail();
+        loadDiff();
+      }
+    }, 'Show all'));
+  return h('div', { class: 'block' }, title, cut,
+    h('pre', { class: 'diff', 'data-file': `${state.selectedFile.kind}:${state.selectedFile.path}` }, lines));
 }
 
 /**
