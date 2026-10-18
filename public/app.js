@@ -24,6 +24,7 @@ const state = {
   diff: null,
   diffSeq: 0,
   outputs: {}, // id -> { text, error }: the last action's output per repository
+  revealOutput: null, // id whose new output should be scrolled into view on the next render
   bulk: null, // { kind, running, done, total, lines, counts, error }
   drafts: emptyDrafts(),
   remoteEdit: null, // { name, newName, url, pushUrl } while a remote is being edited
@@ -171,10 +172,18 @@ async function stream(url, onEvent, { method = 'GET', signal } = {}) {
   }
 }
 
+const MAX_TOASTS = 3;
+
+/**
+ * Show a short message in the corner. Click to dismiss; only the newest few stay
+ * so they don't pile up over the page.
+ */
 function toast(message, isError = false) {
-  const el = h('div', { class: `toast${isError ? ' error' : ''}` }, message);
-  document.getElementById('toasts').append(el);
-  setTimeout(() => el.remove(), isError ? 8000 : 3500);
+  const container = document.getElementById('toasts');
+  const el = h('div', { class: `toast${isError ? ' error' : ''}`, title: 'Click to dismiss', onclick: () => el.remove() }, message);
+  container.append(el);
+  while (container.children.length > MAX_TOASTS) container.firstElementChild.remove();
+  setTimeout(() => el.remove(), isError ? 8000 : 4000);
 }
 
 /**
@@ -485,9 +494,9 @@ async function runAction(id, action, body = {}) {
       } else {
         delete state.outputs[id];
       }
-      if (network) {
-        toast(`${repoName(id)}: ${label} – ${successSummary(action, result.output)}`);
-      }
+      // The open repository shows the result in its output box
+      if (id === state.selectedId) state.revealOutput = id;
+      else if (network) toast(`${repoName(id)}: ${label} – ${successSummary(action, result.output)}`);
       return true;
     } catch (error) {
       applyLocals(error.data?.locals);
@@ -496,7 +505,8 @@ async function runAction(id, action, body = {}) {
       const details = [error.data?.stdout, error.data?.stderr].filter(Boolean).join('\n').trim();
       const hint = details && error.data?.hint ? `\n\nHint: ${error.data.hint}` : '';
       state.outputs[id] = { text: `$ git ${label}\n${details || error.message}${hint}`, error: true };
-      toast(`${repoName(id)}: ${label} failed – ${errorSummary(error.message)}`, true);
+      if (id === state.selectedId) state.revealOutput = id;
+      else toast(`${repoName(id)}: ${label} failed – ${errorSummary(error.message)}`, true);
       return false;
     }
   });
@@ -1122,6 +1132,10 @@ function renderDetail() {
   }
   rebuildPreservingFocus(container, () => container.replaceChildren(...nodes(buildDetail(d))));
   restoreLogScroll(container);
+  if (state.revealOutput === d.id) {
+    state.revealOutput = null;
+    container.querySelector('.output-block')?.scrollIntoView({ block: 'nearest' });
+  }
 }
 
 function buildDetail(d) {
@@ -1263,6 +1277,14 @@ function buildDetail(d) {
       actionButton('push', 'Push', remoteBody(pushRemote), 'primary'),
       forcePush
     ),
+    // Right under the buttons that produce it, so the result of a pull or push is in view
+    output && h('div', { class: 'block output-block' },
+      h('div', { class: 'block-title' },
+        h('span', {}, 'Output'),
+        h('button', { class: 'btn small', onclick: () => { delete state.outputs[id]; renderDetail(); } }, 'Clear')
+      ),
+      logBox(output, output.text, output.error ? ' error' : '')
+    ),
     d.operation && h('div', { class: 'block operation' },
       h('div', { class: 'block-title' },
         h('span', {}, `${d.operation[0].toUpperCase()}${d.operation.slice(1)} in progress`),
@@ -1337,13 +1359,6 @@ function buildDetail(d) {
       )
     ),
     renderDiff(),
-    output && h('div', { class: 'block' },
-      h('div', { class: 'block-title' },
-        h('span', {}, 'Output'),
-        h('button', { class: 'btn small', onclick: () => { delete state.outputs[id]; renderDetail(); } }, 'Clear')
-      ),
-      logBox(output, output.text, output.error ? ' error' : '')
-    ),
     h('div', { class: 'block' },
       h('div', { class: 'block-title' },
         h('span', {}, 'Stashes', h('span', { class: 'count' }, d.stashes.length))
