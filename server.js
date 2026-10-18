@@ -397,23 +397,34 @@ async function fetchGroup(group, stream) {
 }
 
 /**
- * Fast-forward a checkout that is behind its upstream and has no local commits or changes.
- * Returns what happened, or null when there was nothing to pull.
+ * Fast-forward a checkout that is behind its upstream and has no local commits or changes
+ * to tracked files. Runs after its git directory was fetched, so it merges without fetching again.
+ * @returns {Promise<Object>} { kind: 'pulled' | 'current' | 'skipped' | 'failed', relPath, ... }
  */
 async function pullIfClean(repo) {
-  const summary = await repoSummary(repo);
-  if (summary.error || !summary.upstream || summary.behind === 0) return null;
-  if (summary.ahead > 0) {
-    return { kind: 'skipped', relPath: repo.relPath, reason: `diverged (↑${summary.ahead} ↓${summary.behind})` };
+  const relPath = repo.relPath;
+  let st;
+  try {
+    st = await git.status(repo.path);
+  } catch (error) {
+    return { kind: 'failed', relPath, error: error.message };
   }
-  if (summary.changes > 0) {
-    return { kind: 'skipped', relPath: repo.relPath, reason: 'uncommitted changes' };
+  if (!st.branch) return { kind: 'skipped', relPath, reason: 'detached HEAD' };
+  if (!st.upstream) return { kind: 'skipped', relPath, reason: `${st.branch} has no upstream branch` };
+  if (st.behind === 0) return { kind: 'current', relPath };
+  if (st.ahead > 0) {
+    return { kind: 'skipped', relPath, reason: `diverged (↑${st.ahead} ↓${st.behind}), pull it with rebase or merge` };
+  }
+  // Untracked files don't block a fast-forward; git refuses by itself if one would be overwritten
+  const changed = new Set([st.staged, st.unstaged, st.conflicted].flat().map(f => f.path)).size;
+  if (changed > 0) {
+    return { kind: 'skipped', relPath, reason: `${changed} uncommitted change${changed === 1 ? '' : 's'}` };
   }
   try {
-    await git.pull(repo.path, 'ff-only');
-    return { kind: 'pulled', relPath: repo.relPath, commits: summary.behind };
+    await git.fastForward(repo.path);
+    return { kind: 'pulled', relPath, commits: st.behind };
   } catch (error) {
-    return { kind: 'failed', relPath: repo.relPath, error: error.message };
+    return { kind: 'failed', relPath, error: error.message };
   }
 }
 
@@ -582,7 +593,8 @@ app.post('/api/sync/fetch-all', streamRoute(async (req, stream) => {
 
 /**
  * Fetch each git directory, then fast-forward its checkouts that are behind their upstream
- * and have no local commits or changes. Anything else is reported as skipped.
+ * and have no local commits or changes to tracked files. Every checkout gets a result, so
+ * the ones that couldn't be pulled say why.
  */
 app.post('/api/sync/pull-all', streamRoute(async (req, stream) => {
   if (!cache.scanned) await rescan();
@@ -598,8 +610,7 @@ app.post('/api/sync/pull-all', streamRoute(async (req, stream) => {
       // One checkout at a time: worktrees of a group share refs and lock files
       await withRepoLock(group.target, async () => {
         for (const repo of group.checkouts) {
-          const result = await pullIfClean(repo);
-          if (result) results.push(result);
+          results.push(await pullIfClean(repo));
         }
       });
     }

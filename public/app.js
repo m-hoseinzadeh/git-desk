@@ -591,7 +591,7 @@ async function runBulk(kind) {
       done: 0,
       total: null,
       lines: [],
-      counts: { pulled: 0, skipped: 0, failed: 0 },
+      counts: { pulled: 0, current: 0, skipped: 0, failed: 0 },
       error: false
     };
     state.bulk = bulk;
@@ -619,7 +619,7 @@ async function runBulk(kind) {
           finishRepo(event.id);
           for (const result of event.results) {
             bulk.counts[result.kind]++;
-            bulk.lines.push(pullResultLine(result));
+            if (result.kind !== 'current') bulk.lines.push(pullResultLine(result));
           }
           applySummaries(event.summaries);
         }
@@ -887,7 +887,7 @@ function renderBulkResult() {
   el.hidden = !bulk;
   if (!bulk) return;
 
-  const { pulled, skipped, failed } = bulk.counts;
+  const { pulled, current, skipped, failed } = bulk.counts;
   let title;
   if (bulk.running) {
     const counted = bulk.total === null ? '' : ` ${bulk.done}/${bulk.total}`;
@@ -895,7 +895,7 @@ function renderBulkResult() {
   } else if (bulk.kind === 'fetch') {
     title = `Fetched ${bulk.done - failed} of ${bulk.total ?? bulk.done} repositories`;
   } else {
-    title = `Pulled ${pulled} · skipped ${skipped} · failed ${failed}`;
+    title = `Pulled ${pulled} · up to date ${current} · skipped ${skipped} · failed ${failed}`;
   }
   const lines = !bulk.running && bulk.lines.length === 0 && bulk.kind === 'pull'
     ? ['Everything is up to date.']
