@@ -22,6 +22,7 @@ const state = {
   statusAt: {}, // id -> when an action last reported its status, so older stream data can't undo it
   selectedId: null,
   detail: null,
+  detailError: null, // Why the selected repository's detail couldn't be loaded
   detailSeq: 0, // Bumped on every detail update so stale responses are ignored
   selectedFile: null, // { path, kind: 'staged' | 'unstaged' | 'untracked' | 'conflicted' }
   diff: null,
@@ -433,12 +434,13 @@ async function loadDetail(id) {
     pruneRemoteChoice(detail);
     const unchanged = JSON.stringify(detail) === JSON.stringify(state.detail);
     state.detail = detail;
+    state.detailError = null;
     await refreshSelectedFileDiff();
     if (unchanged) return;
   } catch (error) {
     if (seq !== state.detailSeq || id !== state.selectedId) return;
     state.detail = null;
-    toast(error.message, true);
+    state.detailError = error.message; // Shown in the panel instead of a spinner
   }
   renderDetail();
 }
@@ -452,6 +454,7 @@ async function selectRepo(id) {
     state.amend = false;
     state.detail = null;
   }
+  state.detailError = null;
   state.selectedId = id;
   markSelectedRow();
   renderDetail();
@@ -501,6 +504,7 @@ async function applyDetail(id, detail) {
   if (id !== state.selectedId) return;
   state.detailSeq++; // Invalidate any slower in-flight loadDetail
   state.detail = detail;
+  state.detailError = null;
   await refreshSelectedFileDiff();
 }
 
@@ -1269,13 +1273,20 @@ function renderDetail() {
   }
   const d = state.detail;
   if (!d) {
-    // Show what the list already knows while the full status loads
+    // Show what the list already knows while the full status loads, or why it couldn't
     const local = findLocal(state.selectedId);
+    const id = state.selectedId;
     container.replaceChildren(...nodes([
       local && h('div', { class: 'detail-header' },
         h('h2', {}, local.fullName || local.name),
         h('div', { class: 'repo-path' }, local.path)),
-      h('div', { class: 'empty' }, h('span', { class: 'spinner' }), ' Loading…')
+      state.detailError
+        ? h('div', { class: 'block' },
+          h('div', { class: 'block-title' },
+            h('span', {}, "Couldn't read this repository"),
+            h('button', { class: 'btn small', onclick: () => { state.detailError = null; renderDetail(); loadDetail(id); } }, 'Retry')),
+          logBox(state, state.detailError, ' error'))
+        : h('div', { class: 'empty' }, h('span', { class: 'spinner' }), ' Loading…')
     ]));
     return;
   }
