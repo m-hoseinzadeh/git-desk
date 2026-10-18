@@ -218,6 +218,15 @@ function setBusy(key, busy) {
   }
 }
 
+/**
+ * Whether an action is running on a repository. Bulk fetches (":sync") don't count:
+ * the server queues work per repository, so an action started meanwhile just waits.
+ */
+function repoBusy(id) {
+  const prefix = `${id}:`;
+  return [...state.busy].some(key => key.startsWith(prefix) && key !== `${id}:sync`);
+}
+
 function busyLabel(key, label) {
   return state.busy.has(key) ? [h('span', { class: 'spinner' }), ' ', label] : label;
 }
@@ -481,6 +490,10 @@ async function applyDetail(id, detail) {
  */
 async function runAction(id, action, body = {}) {
   const label = action.replace('-', ' ');
+  if (repoBusy(id)) {
+    toast(`${repoName(id)}: wait for the running action to finish`, true);
+    return false;
+  }
   return withBusy(`${id}:${action}`, async () => {
     try {
       const result = await api(`/api/repo/${action}`, { method: 'POST', body: { id, ...body } });
@@ -745,13 +758,13 @@ function rowActions(local) {
     h('button', {
       class: 'btn small',
       title: choice.pull ? `${pullTitle} from ${choice.pull}` : pullTitle,
-      disabled: state.busy.has(`${local.id}:pull`),
+      disabled: repoBusy(local.id),
       onclick: stop(() => runAction(local.id, 'pull', { mode: state.pullMode, ...remoteBody(choice.pull) }))
     }, busyLabel(`${local.id}:pull`, 'Pull')),
     h('button', {
       class: 'btn small',
       title: choice.push ? `git push ${choice.push}` : 'git push',
-      disabled: state.busy.has(`${local.id}:push`),
+      disabled: repoBusy(local.id),
       onclick: stop(() => runAction(local.id, 'push', remoteBody(choice.push)))
     }, busyLabel(`${local.id}:push`, 'Push'))
   ];
@@ -1204,7 +1217,7 @@ function buildDetail(d) {
 
   const actionButton = (action, label, body = {}, extraClass = '') => h('button', {
     class: `btn ${extraClass}`,
-    disabled: state.busy.has(`${id}:${action}`),
+    disabled: repoBusy(id),
     onclick: () => runAction(id, action, body)
   }, busyLabel(`${id}:${action}`, label));
 
@@ -1229,7 +1242,7 @@ function buildDetail(d) {
   const forcePush = diverged && h('button', {
     class: 'btn danger',
     title: `git push --force-with-lease${pushRemote ? ` ${pushRemote}` : ''}`,
-    disabled: state.busy.has(`${id}:push`),
+    disabled: repoBusy(id),
     onclick: () => {
       if (confirm(`Force push ${st.branch}? This replaces ${pushTarget.behind} commit(s) on ${pushTarget.ref} with your local history.`)) {
         runAction(id, 'push', { force: true, ...remoteBody(pushRemote) });
@@ -1291,14 +1304,14 @@ function buildDetail(d) {
         h('div', { class: 'repo-actions' },
           h('button', {
             class: 'btn small danger',
-            disabled: state.busy.has(`${id}:abort`),
+            disabled: repoBusy(id),
             onclick: () => {
               if (confirm(`Abort the ${d.operation} and go back to the state before it started?`)) runAction(id, 'abort');
             }
           }, busyLabel(`${id}:abort`, 'Abort')),
           h('button', {
             class: 'btn small primary',
-            disabled: st.conflicted.length > 0 || state.busy.has(`${id}:continue`),
+            disabled: st.conflicted.length > 0 || repoBusy(id),
             title: st.conflicted.length > 0 ? 'Resolve and stage all conflicted files first' : `git ${d.operation} --continue`,
             onclick: () => runAction(id, 'continue')
           }, busyLabel(`${id}:continue`, 'Continue'))
@@ -1353,7 +1366,7 @@ function buildDetail(d) {
         amendToggle,
         h('button', {
           class: 'btn primary',
-          disabled: (st.staged.length === 0 && !state.amend) || state.busy.has(`${id}:commit`),
+          disabled: (st.staged.length === 0 && !state.amend) || repoBusy(id),
           onclick: commit
         }, busyLabel(`${id}:commit`, state.amend ? 'Amend' : `Commit${st.staged.length ? ` (${st.staged.length})` : ''}`))
       )
@@ -1367,7 +1380,7 @@ function buildDetail(d) {
         stashInput,
         h('button', {
           class: 'btn small',
-          disabled: changeCount + st.staged.length === 0 || state.busy.has(`${id}:stash`),
+          disabled: changeCount + st.staged.length === 0 || repoBusy(id),
           onclick: stash
         }, busyLabel(`${id}:stash`, 'Stash changes'))
       ),
@@ -1485,14 +1498,14 @@ function remoteInput(id, placeholder, value, onInput, onEnter) {
 
 function remoteEditRow(id, remote) {
   const edit = state.remoteEdit;
-  const busy = state.busy.has(`${id}:remote-rename`) || state.busy.has(`${id}:remote-set-url`);
+  const saving = state.busy.has(`${id}:remote-rename`) || state.busy.has(`${id}:remote-set-url`);
   const save = () => saveRemote(id, remote);
   return h('li', { class: 'remote-edit' },
     remoteInput('remote-edit-name', 'name', edit.newName, v => { edit.newName = v; }, save),
     h('div', { class: 'remote-buttons' },
       h('button', { class: 'btn small', onclick: () => { state.remoteEdit = null; renderDetail(); } }, 'Cancel'),
-      h('button', { class: 'btn small primary', disabled: busy, onclick: save },
-        busy ? [h('span', { class: 'spinner' }), ' Save'] : 'Save')
+      h('button', { class: 'btn small primary', disabled: repoBusy(id), onclick: save },
+        saving ? [h('span', { class: 'spinner' }), ' Save'] : 'Save')
     ),
     remoteInput('remote-edit-url', 'fetch URL', edit.url, v => { edit.url = v; }, save),
     remoteInput('remote-edit-pushurl', 'push URL (same as fetch URL)', edit.pushUrl, v => { edit.pushUrl = v; }, save)
@@ -1511,7 +1524,7 @@ function remoteRow(id, remote) {
       h('button', {
         class: 'btn small',
         title: `git fetch --prune ${remote.name}`,
-        disabled: state.busy.has(`${id}:fetch`),
+        disabled: repoBusy(id),
         onclick: () => runAction(id, 'fetch', { remote: remote.name })
       }, 'Fetch'),
       h('button', {
@@ -1523,7 +1536,7 @@ function remoteRow(id, remote) {
       }, 'Edit'),
       h('button', {
         class: 'btn small danger',
-        disabled: state.busy.has(`${id}:remote-remove`),
+        disabled: repoBusy(id),
         onclick: () => {
           if (confirm(`Remove remote ${remote.name}? Its remote-tracking branches and the upstream settings that point to it are removed too.`)) {
             runAction(id, 'remote-remove', { name: remote.name });
@@ -1566,7 +1579,7 @@ function remotesBlock(d) {
       remoteInput('remote-url', 'URL', state.drafts.remoteUrl, v => { state.drafts.remoteUrl = v; }, add),
       h('button', {
         class: 'btn small',
-        disabled: state.busy.has(`${id}:remote-add`),
+        disabled: repoBusy(id),
         onclick: add
       }, busyLabel(`${id}:remote-add`, 'Add remote'))
     ),

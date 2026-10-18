@@ -105,6 +105,24 @@ async function reloadRemotes(repo) {
   if (!(cache.scanned || []).includes(repo)) applyRemotes(repo, remotes);
 }
 
+const repoLocks = new Map(); // commonDir -> promise that settles when the queued work is done
+
+/**
+ * Run git work on a repository once the work queued before it has finished. Two git commands
+ * at once fail on index.lock or ref locks, and checkouts sharing a git directory share refs,
+ * so they queue together.
+ */
+function withRepoLock(repo, fn) {
+  const key = repo.commonDir;
+  const work = (repoLocks.get(key) || Promise.resolve()).then(fn);
+  const tail = work.catch(() => {});
+  repoLocks.set(key, tail);
+  tail.then(() => {
+    if (repoLocks.get(key) === tail) repoLocks.delete(key);
+  });
+  return work;
+}
+
 /**
  * Look up a repository by scan id. An unknown id rescans once first: after a server restart
  * the cache is empty while the page still lists repositories, and a repository may have
@@ -371,7 +389,7 @@ function remoteGroups() {
 async function fetchGroup(group, stream) {
   stream.send({ type: 'begin', id: group.target.id });
   try {
-    await git.fetch(group.target.path);
+    await withRepoLock(group.target, () => git.fetch(group.target.path));
     return { ok: true };
   } catch (error) {
     return { ok: false, error: error.message };
@@ -578,10 +596,12 @@ app.post('/api/sync/pull-all', streamRoute(async (req, stream) => {
       results.push({ kind: 'failed', relPath: group.target.relPath, error: `fetch: ${fetched.error}` });
     } else {
       // One checkout at a time: worktrees of a group share refs and lock files
-      for (const repo of group.checkouts) {
-        const result = await pullIfClean(repo);
-        if (result) results.push(result);
-      }
+      await withRepoLock(group.target, async () => {
+        for (const repo of group.checkouts) {
+          const result = await pullIfClean(repo);
+          if (result) results.push(result);
+        }
+      });
     }
     stream.send({ type: 'group', id: group.target.id, results, summaries: await summariesFor(group.target) });
   });
@@ -611,7 +631,7 @@ app.post('/api/repo/:action', async (req, res) => {
   const repo = await getRepo(body.id);
   let result;
   try {
-    result = await action(repo, body);
+    result = await withRepoLock(repo, () => action(repo, body));
   } catch (error) {
     // A failed pull or checkout can still change the repo (e.g. conflicts), so send fresh state
     Object.assign(error, await actionState(repo, req.params.action));
