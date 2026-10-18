@@ -7,6 +7,8 @@ A Node.js application that connects to your GitHub account, shows the collaborat
 - 🖥️ Local web UI (`npm start`) with two tabs: **Sync** and **Collaborators**
 - 🔄 **Sync**: finds every git clone under the app's parent directory and matches it to your GitHub repos
   - Fetch, pull (merge / rebase / fast-forward only) and push. The upstream is set on first push, and force-with-lease is offered after an amend
+  - Choose which remote to pull from and push to, per repo (remembered in the browser; defaults to what plain `git pull` / `git push` would use)
+  - Manage remotes: add, rename, set the fetch or push URL, remove, or fetch a single remote
   - Stage, unstage or discard single files or everything; commit or amend
   - Stash changes, then apply, pop or drop stashes
   - Abort or continue a merge or rebase that stopped on conflicts
@@ -14,25 +16,28 @@ A Node.js application that connects to your GitHub account, shows the collaborat
   - Per-file diffs for staged, unstaged and untracked changes
   - Ahead/behind and uncommitted-change badges
   - **Fetch all**, and **Pull all**, which fetches everything and then fast-forwards clean repos that are behind
+  - **Auto-fetch** (on by default) keeps ahead/behind counts current by fetching quietly on page load and again when you return after 15 minutes
   - Clone account repos you don't have locally yet
   - Worktrees are grouped under their main repo; clones of repos outside your account are listed separately
 
-- 📁 Lists all repositories (public and private) from your GitHub account
-- 👥 Shows collaborators for each repository with their permissions
-- 🔒 Handles private repositories and access permissions gracefully
-- ⚡ Efficient pagination to handle accounts with many repositories
-- 🛡️ Rate limit awareness to avoid API throttling
-- 📊 Detailed repository information including stars, forks, and language
+- 👥 **Collaborators**: lists every repository (public and private) in your GitHub account with its collaborators and their permissions
+  - Paginates through accounts with many repositories
+  - Retries rate-limited requests and lists any repository it still couldn't load, instead of dropping it
 
 ## Prerequisites
 
-- Node.js (version 14 or higher)
+- Node.js 18 or higher
 - A GitHub account
 - A GitHub Personal Access Token
 
 ## Setup
 
-1. **Clone or download this project**
+1. **Clone this project** into the folder that holds your other clones (the Sync tab scans the folder above it)
+   ```bash
+   cd ~/repo
+   git clone https://github.com/m-hoseinzadeh/repo-collaborators.git
+   cd repo-collaborators
+   ```
 
 2. **Install dependencies**
    ```bash
@@ -75,7 +80,7 @@ npm run cli
 
 ### Sync
 
-The Sync tab scans the directory above this project (for example `~/repo` if the app lives in `~/repo/repo-collaborators`) up to 4 levels deep. It skips `node_modules` and hidden folders. Each repo's `origin` remote is matched to your GitHub repos, and the results are shown in three sections:
+The Sync tab scans the directory above this project (for example `~/repo` if the app lives in `~/repo/repo-collaborators`) up to 4 levels deep. It skips `node_modules` and hidden folders. Each repo is matched to your GitHub repos by its `origin` remote, or by its first GitHub remote if `origin` isn't one, and the results are shown in three sections:
 
 - **Cloned**: account repos found on disk (worktrees are indented under their repo)
 - **Local only**: clones whose remote isn't in your account
@@ -83,11 +88,13 @@ The Sync tab scans the directory above this project (for example `~/repo` if the
 
 Repositories show up as soon as the disk scan finishes and each status fills in as it is read; GitHub matching follows when GitHub answers. Fetch all, Pull all and the Collaborators tab also show each result as it arrives, with a progress bar.
 
-Click a repository to stage files, view diffs, commit, switch or create branches, and pull/push. When you come back to the browser after 10 seconds or more, statuses are refreshed quietly: only rows that changed are redrawn.
+Click a repository to stage files, view diffs, commit, stash, switch or create branches, manage remotes, and pull/push. When you come back to the browser after 10 seconds or more, statuses are refreshed quietly: only rows that changed are redrawn.
 
 Git runs with your normal credentials (SSH keys, `core.sshCommand`, credential helpers). For `https://github.com` remotes the app also offers your `GITHUB_TOKEN`, but only when your own credential helpers have nothing. Prompts are disabled, so a missing credential shows up as an error instead of hanging.
 
 Sync works without a `GITHUB_TOKEN`; every clone then shows as "local only".
+
+Use `npm run dev` while working on the app itself: it restarts the server when a file changes.
 
 ### Options (`.env` or environment)
 
@@ -119,7 +126,6 @@ GitHub's API has rate limits:
 - The web UI listens on `127.0.0.1` only. It rejects requests with a foreign `Host` header and any cross-site write request, so other websites can't trigger git actions.
 - Git only runs inside repositories found by the scan, and file paths sent to the API must stay inside that repository.
 - The token is passed to git through the environment, never on the command line.
-
 - Never commit your `.env` file to version control
 - Keep your GitHub token secure and don't share it
 - The token gives access to your repositories according to the scopes you selected
@@ -140,4 +146,4 @@ GitHub's API has rate limits:
 
 ## License
 
-MIT License - feel free to use and modify as needed.
+[MIT](LICENSE)
