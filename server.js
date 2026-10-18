@@ -156,10 +156,22 @@ function summarizeStatus(status) {
   };
 }
 
+/**
+ * When the checkout last fetched (ms), from FETCH_HEAD: it is per worktree, and a fetch
+ * from the main checkout also updates a worktree's remote-tracking branches, so the newer counts
+ */
+async function lastFetched(repo) {
+  const times = await Promise.all([...new Set([repo.gitDir, repo.commonDir])].map(dir =>
+    fs.promises.stat(path.join(dir, 'FETCH_HEAD')).then(s => s.mtimeMs, () => null)));
+  const known = times.filter(Boolean);
+  return known.length > 0 ? Math.round(Math.max(...known)) : null;
+}
+
 async function repoSummary(repo) {
   if (repo.error) return { error: repo.error };
   try {
-    return summarizeStatus(await git.status(repo.path));
+    const [status, fetchedAt] = await Promise.all([git.status(repo.path), lastFetched(repo)]);
+    return { ...summarizeStatus(status), fetchedAt };
   } catch (error) {
     return { error: error.message };
   }

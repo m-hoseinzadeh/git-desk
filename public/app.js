@@ -9,6 +9,9 @@ const PULL_MODES = [
 
 // Coming back to the window after at least this long quietly refreshes statuses
 const RETURN_REFRESH_MS = 10 * 1000;
+// Ahead/behind are only as fresh as the last fetch, so the app fetches everything when it
+// opens and when the user comes back after at least this long
+const AUTO_FETCH_MS = 15 * 60 * 1000;
 
 const state = {
   locals: null, // Top-level local repositories (worktrees nested) from the last scan
@@ -25,7 +28,10 @@ const state = {
   diffSeq: 0,
   outputs: {}, // id -> { text, error, retry }: the last action's output per repository
   revealOutput: null, // id whose new output should be scrolled into view on the next render
-  bulk: null, // { kind, running, done, total, lines, counts, error }
+  bulk: null, // Shown bulk result: { kind, running, done, total, lines, counts, error }
+  bulkRun: null, // The running bulk operation (a quiet auto-fetch isn't shown in state.bulk)
+  autoFetch: readSetting('autoFetch', '1') === '1',
+  lastAutoFetch: 0,
   drafts: emptyDrafts(),
   remoteEdit: null, // { name, newName, url, pushUrl } while a remote is being edited
   amend: false,
@@ -603,8 +609,11 @@ async function cloneRepo(fullName) {
 
 /**
  * Fetch all or pull all. Each repository's result shows up as soon as it is done.
+ * A quiet run (auto-fetch) shows only row spinners and toolbar progress, and its result
+ * panel only when something failed.
  */
-async function runBulk(kind) {
+async function runBulk(kind, { quiet = false } = {}) {
+  if (state.busy.has('fetch-all') || state.busy.has('pull-all')) return;
   await withBusy(`${kind}-all`, async () => {
     const bulk = {
       kind,
@@ -615,7 +624,8 @@ async function runBulk(kind) {
       counts: { pulled: 0, current: 0, skipped: 0, failed: 0 },
       error: false
     };
-    state.bulk = bulk;
+    state.bulkRun = bulk;
+    if (!quiet) state.bulk = bulk;
     const syncing = new Set();
     const finishRepo = id => {
       if (syncing.delete(id)) setBusy(`${id}:sync`, false);
@@ -655,10 +665,39 @@ async function runBulk(kind) {
       syncing.forEach(id => setBusy(`${id}:sync`, false));
       bulk.running = false;
       bulk.error = bulk.counts.failed > 0;
+      state.bulkRun = null;
+      if (quiet && bulk.error) {
+        bulk.lines.unshift('Automatic fetch:');
+        state.bulk = bulk;
+      }
       renderBulkResult();
     }
     if (state.selectedId) loadDetail(state.selectedId);
   });
+}
+
+/**
+ * Fetch everything in the background, unless switched off or already done recently
+ */
+function autoFetch({ force = false } = {}) {
+  if (!state.autoFetch) return;
+  if (!force && Date.now() - state.lastAutoFetch < AUTO_FETCH_MS) return;
+  state.lastAutoFetch = Date.now();
+  runBulk('fetch', { quiet: true });
+}
+
+function timeAgo(ms) {
+  const seconds = Math.max(0, Math.round((Date.now() - ms) / 1000));
+  if (seconds < 60) return 'just now';
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) return `${hours} h ago`;
+  return `${Math.round(hours / 24)} days ago`;
+}
+
+function fetchedText(status) {
+  return status?.fetchedAt ? `fetched ${timeAgo(status.fetchedAt)}` : 'never fetched';
 }
 
 function pullResultLine(result) {
@@ -761,7 +800,10 @@ function statusPills(local) {
   if (status.error) return [syncing, h('span', { class: 'pill error', title: status.error }, 'error')];
   return [
     syncing,
-    h('span', { class: 'pill', title: status.upstream ? `tracking ${status.upstream}` : 'no upstream' }, status.branch || 'detached'),
+    h('span', {
+      class: 'pill',
+      title: `${status.upstream ? `tracking ${status.upstream}` : 'no upstream'}; ↑/↓ as of the last fetch (${fetchedText(status)})`
+    }, status.branch || 'detached'),
     status.ahead > 0 && h('span', { class: 'pill ahead', title: 'commits to push' }, `↑${status.ahead}`),
     status.behind > 0 && h('span', { class: 'pill behind', title: 'commits to pull' }, `↓${status.behind}`),
     status.conflicted > 0 && h('span', { class: 'pill conflict' }, `${status.conflicted} conflict`),
@@ -1320,9 +1362,9 @@ function buildDetail(d) {
       h('button', { class: 'btn', onclick: createBranch }, 'Create branch')
     ),
     h('div', { class: 'detail-bar' },
-      st.upstream
-        ? h('span', { class: 'muted', title: 'upstream' }, `${st.upstream} ↑${st.ahead} ↓${st.behind}`)
-        : h('span', { class: 'muted' }, 'no upstream'),
+      h('span', { class: 'muted', title: 'Ahead/behind are as of the last fetch' },
+        st.upstream ? `${st.upstream} ↑${st.ahead} ↓${st.behind}` : 'no upstream',
+        d.remotes.length > 0 && ` · ${fetchedText(findLocal(id)?.status)}`),
       h('div', { class: 'spacer' }),
       actionButton('fetch', 'Fetch'),
       // Each button wraps together with the selectors that configure it
@@ -1654,8 +1696,8 @@ function setPullMode(mode) {
 }
 
 function renderToolbar() {
-  const bulk = state.bulk;
-  const progress = bulk?.running && bulk.total !== null ? ` ${bulk.done}/${bulk.total}` : '';
+  const bulk = state.bulkRun;
+  const progress = bulk && bulk.total !== null ? ` ${bulk.done}/${bulk.total}` : '';
   const buttons = [
     ['btn-rescan', 'rescan', 'Rescan disk'],
     ['btn-refresh-account', 'refresh', 'Reload GitHub'],
@@ -1694,6 +1736,14 @@ document.querySelectorAll('#view-filter .chip').forEach(chip => {
   });
 });
 
+const autoFetchToggle = document.getElementById('auto-fetch');
+autoFetchToggle.checked = state.autoFetch;
+autoFetchToggle.addEventListener('change', () => {
+  state.autoFetch = autoFetchToggle.checked;
+  writeSetting('autoFetch', state.autoFetch ? '1' : '0');
+  autoFetch({ force: true });
+});
+
 const globalPullMode = document.getElementById('pull-mode-global');
 globalPullMode.replaceChildren(...pullModeOptions());
 globalPullMode.addEventListener('change', event => setPullMode(event.target.value));
@@ -1720,7 +1770,7 @@ function refreshOnReturn() {
   const away = Date.now() - awaySince;
   awaySince = null;
   if (away < RETURN_REFRESH_MS || state.busy.size > 0) return;
-  loadSync({ quiet: true });
+  loadSync({ quiet: true }).then(() => autoFetch());
   if (state.selectedId) loadDetail(state.selectedId);
 }
 window.addEventListener('blur', markAway);
@@ -1730,4 +1780,4 @@ document.addEventListener('visibilitychange', refreshOnReturn);
 renderToolbar();
 renderRepoList();
 loadUser();
-loadSync({ rescan: true });
+loadSync({ rescan: true }).then(() => autoFetch({ force: true }));
