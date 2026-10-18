@@ -404,10 +404,13 @@ function remoteGroups() {
   }));
 }
 
+/**
+ * Fetch a group's git directory. Callers hold its repository lock.
+ */
 async function fetchGroup(group, stream) {
   stream.send({ type: 'begin', id: group.target.id });
   try {
-    await withRepoLock(group.target, () => git.fetch(group.target.path));
+    await git.fetch(group.target.path);
     return { ok: true };
   } catch (error) {
     return { ok: false, error: error.message };
@@ -598,7 +601,7 @@ app.post('/api/sync/fetch-all', streamRoute(async (req, stream) => {
   stream.send({ type: 'start', total: groups.length });
   await mapLimit(groups, 4, async group => {
     if (stream.closed) return;
-    const result = await fetchGroup(group, stream);
+    const result = await withRepoLock(group.target, () => fetchGroup(group, stream));
     stream.send({
       type: 'fetched',
       id: group.target.id,
@@ -621,18 +624,19 @@ app.post('/api/sync/pull-all', streamRoute(async (req, stream) => {
   stream.send({ type: 'start', total: groups.length });
   await mapLimit(groups, 4, async group => {
     if (stream.closed) return;
-    const fetched = await fetchGroup(group, stream);
     const results = [];
-    if (!fetched.ok) {
-      results.push({ kind: 'failed', relPath: group.target.relPath, error: `fetch: ${fetched.error}` });
-    } else {
+    // Fetch and fast-forward under one lock, so no other action runs in between
+    await withRepoLock(group.target, async () => {
+      const fetched = await fetchGroup(group, stream);
+      if (!fetched.ok) {
+        results.push({ kind: 'failed', relPath: group.target.relPath, error: `fetch: ${fetched.error}` });
+        return;
+      }
       // One checkout at a time: worktrees of a group share refs and lock files
-      await withRepoLock(group.target, async () => {
-        for (const repo of group.checkouts) {
-          results.push(await pullIfClean(repo));
-        }
-      });
-    }
+      for (const repo of group.checkouts) {
+        results.push(await pullIfClean(repo));
+      }
+    });
     stream.send({ type: 'group', id: group.target.id, results, summaries: await summariesFor(group.target) });
   });
   stream.send({ type: 'done' });
