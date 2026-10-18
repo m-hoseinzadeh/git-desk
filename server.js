@@ -528,7 +528,7 @@ app.use((req, res, next) => {
     return res.status(403).json({ error: 'Forbidden host' });
   }
   if (req.path.startsWith('/api/')) {
-    if (req.headers['x-requested-with'] !== 'repo-collaborators') {
+    if (req.headers['x-requested-with'] !== 'git-desk') {
       return res.status(403).json({ error: 'Forbidden' });
     }
     if (req.method !== 'GET' && req.method !== 'HEAD') {
@@ -721,7 +721,7 @@ function openBrowser(url) {
 if (require.main === module) {
   const server = app.listen(PORT, HOST, () => {
     const url = `http://localhost:${PORT}`;
-    console.log(`Repo Collaborators UI running at ${url}`);
+    console.log(`Git Desk running at ${url}`);
     console.log(`Scanning for local repositories under ${SCAN_ROOT} (depth ${SCAN_DEPTH})`);
     if (!client) {
       console.warn('GITHUB_TOKEN is not set - only local repositories will be shown.');

@@ -1,4 +1,4 @@
-# GitHub Repository Collaborator Viewer
+# Git Desk
 
 A Node.js application that connects to your GitHub account, shows the collaborators on your repositories, and syncs your local clones with a web UI.
 
@@ -35,8 +35,8 @@ A Node.js application that connects to your GitHub account, shows the collaborat
 1. **Clone this project** into the folder that holds your other clones (the Sync tab scans the folder above it)
    ```bash
    cd ~/repo
-   git clone https://github.com/m-hoseinzadeh/repo-collaborators.git
-   cd repo-collaborators
+   git clone https://github.com/m-hoseinzadeh/git-desk.git
+   cd git-desk
    ```
 
 2. **Install dependencies**
@@ -47,7 +47,7 @@ A Node.js application that connects to your GitHub account, shows the collaborat
 3. **Create a GitHub Personal Access Token**
    - Go to [GitHub Settings > Developer settings > Personal access tokens](https://github.com/settings/tokens)
    - Click "Generate new token (classic)"
-   - Give it a descriptive name like "Repo Collaborator Viewer"
+   - Give it a descriptive name like "Git Desk"
    - Select the following scopes:
      - `repo` (for access to private repositories)
      - OR `public_repo` (if you only want to see public repositories)
@@ -80,7 +80,7 @@ npm run cli
 
 ### Sync
 
-The Sync tab scans the directory above this project (for example `~/repo` if the app lives in `~/repo/repo-collaborators`) up to 4 levels deep. It skips `node_modules` and hidden folders. Each repo is matched to your GitHub repos by its `origin` remote, or by its first GitHub remote if `origin` isn't one, and the results are shown in three sections:
+The Sync tab scans the directory above this project (for example `~/repo` if the app lives in `~/repo/git-desk`) up to 4 levels deep. It skips `node_modules` and hidden folders. Each repo is matched to your GitHub repos by its `origin` remote, or by its first GitHub remote if `origin` isn't one, and the results are shown in three sections:
 
 - **Cloned**: account repos found on disk (worktrees are indented under their repo)
 - **Local only**: clones whose remote isn't in your account

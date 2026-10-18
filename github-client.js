@@ -34,7 +34,7 @@ class GitHubClient {
     this.headers = {
       'Authorization': `token ${token}`,
       'Accept': 'application/vnd.github.v3+json',
-      'User-Agent': 'GitHub-Repo-Collaborators-App'
+      'User-Agent': 'git-desk'
     };
   }
 

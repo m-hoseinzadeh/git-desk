@@ -1,5 +1,5 @@
 {
-  "name": "github-repo-collaborators",
+  "name": "git-desk",
   "version": "1.0.0",
   "description": "A Node.js app to view GitHub repository collaborators and sync local clones",
   "main": "server.js",

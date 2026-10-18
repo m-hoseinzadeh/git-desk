@@ -143,7 +143,7 @@ async function api(url, { method = 'GET', body } = {}) {
   const response = await fetch(url, {
     method,
     headers: {
-      'X-Requested-With': 'repo-collaborators',
+      'X-Requested-With': 'git-desk',
       ...(body ? { 'Content-Type': 'application/json' } : {})
     },
     body: body ? JSON.stringify(body) : undefined
@@ -161,7 +161,7 @@ async function api(url, { method = 'GET', body } = {}) {
  * Read a newline-delimited JSON stream and call onEvent for each event as it arrives
  */
 async function stream(url, onEvent, { method = 'GET', signal } = {}) {
-  const response = await fetch(url, { method, signal, headers: { 'X-Requested-With': 'repo-collaborators' } });
+  const response = await fetch(url, { method, signal, headers: { 'X-Requested-With': 'git-desk' } });
   if (!response.ok) {
     const data = await response.json().catch(() => ({}));
     throw new Error(data.error || `Request failed (${response.status})`);
