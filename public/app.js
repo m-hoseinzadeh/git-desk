@@ -23,7 +23,7 @@ const state = {
   selectedFile: null, // { path, kind: 'staged' | 'unstaged' | 'untracked' | 'conflicted' }
   diff: null,
   diffSeq: 0,
-  output: null, // { text, error }
+  outputs: {}, // id -> { text, error }: the last action's output per repository
   bulk: null, // { kind, running, done, total, lines, counts, error }
   drafts: emptyDrafts(),
   remoteEdit: null, // { name, newName, url, pushUrl } while a remote is being edited
@@ -413,7 +413,6 @@ async function loadDetail(id) {
 async function selectRepo(id) {
   if (state.selectedId !== id) {
     closeDiff();
-    state.output = null;
     state.drafts = emptyDrafts();
     state.remoteEdit = null;
     state.amend = false;
@@ -479,26 +478,52 @@ async function runAction(id, action, body = {}) {
       applyLocals(result.locals);
       applySummaries(result.summaries);
       await applyDetail(id, result.detail);
-      if (id === state.selectedId) {
-        state.output = result.output ? { text: `$ git ${label}\n${result.output}`, error: false } : null;
+      const network = ['fetch', 'pull', 'push'].includes(action);
+      // Kept per repository, so a pull from the list shows its output when the repository is opened
+      if (result.output || network) {
+        state.outputs[id] = { text: `$ git ${label}\n${result.output || 'Nothing new.'}`, error: false };
+      } else {
+        delete state.outputs[id];
       }
-      if (['fetch', 'pull', 'push'].includes(action)) {
-        toast(`${label} finished`);
+      if (network) {
+        toast(`${repoName(id)}: ${label} – ${successSummary(action, result.output)}`);
       }
       return true;
     } catch (error) {
       applyLocals(error.data?.locals);
       applySummaries(error.data?.summaries);
       await applyDetail(id, error.data?.detail);
-      if (id === state.selectedId) {
-        const details = [error.data?.stdout, error.data?.stderr].filter(Boolean).join('\n').trim();
-        const hint = details && error.data?.hint ? `\n\nHint: ${error.data.hint}` : '';
-        state.output = { text: `$ git ${label}\n${details || error.message}${hint}`, error: true };
-      }
-      toast(`${label} failed: ${errorSummary(error.message)}`, true);
+      const details = [error.data?.stdout, error.data?.stderr].filter(Boolean).join('\n').trim();
+      const hint = details && error.data?.hint ? `\n\nHint: ${error.data.hint}` : '';
+      state.outputs[id] = { text: `$ git ${label}\n${details || error.message}${hint}`, error: true };
+      toast(`${repoName(id)}: ${label} failed – ${errorSummary(error.message)}`, true);
       return false;
     }
   });
+}
+
+function repoName(id) {
+  return findLocal(id)?.name || 'repository';
+}
+
+/**
+ * What a successful fetch, pull or push did, in a few words
+ */
+function successSummary(action, output) {
+  const text = output || '';
+  if (action === 'fetch') {
+    const updated = text.split('\n').filter(line => / -> /.test(line)).length;
+    return updated ? `${updated} branch${updated === 1 ? '' : 'es'} updated` : 'nothing new';
+  }
+  if (/Already up to date|Everything up-to-date/i.test(text)) {
+    return action === 'push' ? 'nothing to push' : 'already up to date';
+  }
+  if (action === 'pull') {
+    if (/Successfully rebased/i.test(text)) return 'rebased onto the remote';
+    const files = text.match(/\d+ files? changed/);
+    return files ? `updated, ${files[0]}` : 'updated';
+  }
+  return /\[new branch\]/.test(text) ? 'published the branch' : 'pushed';
 }
 
 /**
@@ -1103,6 +1128,7 @@ function buildDetail(d) {
   const id = d.id;
   const st = d.status;
   const changeCount = st.unstaged.length + st.untracked.length;
+  const output = state.outputs[id];
   const hasCommits = d.log.length > 0;
 
   const newBranchInput = h('input', {
@@ -1311,12 +1337,12 @@ function buildDetail(d) {
       )
     ),
     renderDiff(),
-    state.output && h('div', { class: 'block' },
+    output && h('div', { class: 'block' },
       h('div', { class: 'block-title' },
         h('span', {}, 'Output'),
-        h('button', { class: 'btn small', onclick: () => { state.output = null; renderDetail(); } }, 'Clear')
+        h('button', { class: 'btn small', onclick: () => { delete state.outputs[id]; renderDetail(); } }, 'Clear')
       ),
-      logBox(state.output, state.output.text, state.output.error ? ' error' : '')
+      logBox(output, output.text, output.error ? ' error' : '')
     ),
     h('div', { class: 'block' },
       h('div', { class: 'block-title' },
