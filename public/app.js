@@ -513,7 +513,11 @@ async function applyDetail(id, detail) {
  */
 const PULL_FLAGS = { 'ff-only': ' --ff-only', rebase: ' --rebase', merge: ' --no-rebase' };
 
-async function runAction(id, action, body = {}) {
+/**
+ * @param {Object} options - { fromList }: started from a list row. Its result is a toast,
+ *   and the page doesn't scroll to the output box (below the list on narrow screens).
+ */
+async function runAction(id, action, body = {}, { fromList = false } = {}) {
   // Shown as "$ git <label>" above the output
   const label = action.replace('-', ' ') + (action === 'pull' ? PULL_FLAGS[body.mode] || '' : '');
   if (repoBusy(id)) {
@@ -536,7 +540,8 @@ async function runAction(id, action, body = {}) {
         delete state.outputs[id];
       }
       // The open repository shows the result in its output box
-      if (id === state.selectedId) state.revealOutput = id;
+      const inPanel = id === state.selectedId && !fromList;
+      if (inPanel) state.revealOutput = id;
       else if (network) toast(`${repoName(id)}: ${label} – ${successSummary(action, result.output)}`);
       return true;
     } catch (error) {
@@ -550,7 +555,7 @@ async function runAction(id, action, body = {}) {
         error: true,
         retry: retryChoices(action, body, error.data?.reason)
       };
-      if (id === state.selectedId) state.revealOutput = id;
+      if (id === state.selectedId && !fromList) state.revealOutput = id;
       else toast(`${repoName(id)}: ${label} failed – ${errorSummary(error.message)}`, true);
       return false;
     }
@@ -877,13 +882,13 @@ function rowActions(local) {
       class: 'btn small',
       title: blocked || pullBlocked || (choice.pull ? `${pullTitle} from ${choice.pull}` : pullTitle),
       disabled: busy || Boolean(blocked || pullBlocked),
-      onclick: stop(() => runAction(local.id, 'pull', { mode: state.pullMode, ...remoteBody(choice.pull) }))
+      onclick: stop(() => runAction(local.id, 'pull', { mode: state.pullMode, ...remoteBody(choice.pull) }, { fromList: true }))
     }, busyLabel(`${local.id}:pull`, 'Pull')),
     h('button', {
       class: 'btn small',
       title: blocked || pushTitle,
       disabled: busy || Boolean(blocked) || nothingToPush,
-      onclick: stop(() => runAction(local.id, 'push', remoteBody(choice.push)))
+      onclick: stop(() => runAction(local.id, 'push', remoteBody(choice.push), { fromList: true }))
     }, busyLabel(`${local.id}:push`, pushLabel))
   ];
 }
