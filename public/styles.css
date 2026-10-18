@@ -282,6 +282,9 @@ main { padding: 16px 20px 40px; }
 }
 
 .detail-bar #pull-remote, .detail-bar #push-remote { max-width: 300px; }
+.bar-group { display: flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; }
+.bar-group select { min-width: 90px; flex: 0 1 auto; }
+.bar-group .btn { flex-shrink: 0; }
 
 .block { padding: 12px 16px; border-bottom: 1px solid var(--border); }
 .block:last-child { border-bottom: 0; }

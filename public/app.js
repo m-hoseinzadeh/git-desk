@@ -1325,12 +1325,15 @@ function buildDetail(d) {
         : h('span', { class: 'muted' }, 'no upstream'),
       h('div', { class: 'spacer' }),
       actionButton('fetch', 'Fetch'),
-      pullMode,
-      remoteSelect(d, 'pull'),
-      actionButton('pull', 'Pull', { mode: state.pullMode, ...remoteBody(pullRemote) }),
-      remoteSelect(d, 'push'),
-      actionButton('push', 'Push', remoteBody(pushRemote), 'primary'),
-      forcePush
+      // Each button wraps together with the selectors that configure it
+      h('div', { class: 'bar-group' },
+        pullMode,
+        remoteSelect(d, 'pull'),
+        actionButton('pull', 'Pull', { mode: state.pullMode, ...remoteBody(pullRemote) })),
+      h('div', { class: 'bar-group' },
+        remoteSelect(d, 'push'),
+        actionButton('push', 'Push', remoteBody(pushRemote), 'primary'),
+        forcePush)
     ),
     // Right under the buttons that produce it, so the result of a pull or push is in view
     output && h('div', { class: 'block output-block' },
