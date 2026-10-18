@@ -149,6 +149,7 @@ function summarizeStatus(status) {
   return {
     branch: status.branch,
     upstream: status.upstream,
+    upstreamGone: status.upstreamGone,
     ahead: status.ahead,
     behind: status.behind,
     changes: changed.size,
@@ -428,6 +429,7 @@ async function pullIfClean(repo) {
   }
   if (!st.branch) return { kind: 'skipped', relPath, reason: 'detached HEAD' };
   if (!st.upstream) return { kind: 'skipped', relPath, reason: `${st.branch} has no upstream branch` };
+  if (st.upstreamGone) return { kind: 'skipped', relPath, reason: `its upstream ${st.upstream} no longer exists on the remote` };
   if (st.behind === 0) return { kind: 'current', relPath };
   if (st.ahead > 0) {
     return { kind: 'skipped', relPath, reason: `diverged (↑${st.ahead} ↓${st.behind}), pull it with rebase or merge` };

@@ -807,6 +807,7 @@ function statusPills(local) {
       class: 'pill',
       title: `${status.upstream ? `tracking ${status.upstream}` : 'no upstream'}; ↑/↓ as of the last fetch (${fetchedText(status)})`
     }, status.branch || 'detached'),
+    status.upstreamGone && h('span', { class: 'pill behind', title: `${status.upstream} no longer exists on the remote` }, 'upstream gone'),
     status.ahead > 0 && h('span', { class: 'pill ahead', title: 'commits to push' }, `↑${status.ahead}`),
     status.behind > 0 && h('span', { class: 'pill behind', title: 'commits to pull' }, `↓${status.behind}`),
     status.conflicted > 0 && h('span', { class: 'pill conflict' }, `${status.conflicted} conflict`),
@@ -832,11 +833,18 @@ function rowActions(local) {
   else if (status?.error) blocked = status.error;
   else if (status && !status.branch) blocked = 'Detached HEAD: switch to a branch first';
 
+  let pullBlocked = null;
+  if (!blocked && status?.upstreamGone && !choice.pull) {
+    pullBlocked = `${status.upstream} no longer exists on the remote. Push to recreate it, or switch branches.`;
+  }
+
   let pushLabel = 'Push';
   let pushTitle = choice.push ? `git push ${choice.push}` : 'git push';
   let nothingToPush = false;
   if (!blocked && status && !choice.push) {
-    if (!status.upstream) {
+    if (status.upstreamGone) {
+      pushTitle = `Push ${status.branch} to recreate ${status.upstream}`;
+    } else if (!status.upstream) {
       pushLabel = 'Publish';
       pushTitle = `Push ${status.branch} and track it (no upstream yet)`;
     } else if (status.ahead === 0) {
@@ -848,8 +856,8 @@ function rowActions(local) {
   return [
     h('button', {
       class: 'btn small',
-      title: blocked || (choice.pull ? `${pullTitle} from ${choice.pull}` : pullTitle),
-      disabled: busy || Boolean(blocked),
+      title: blocked || pullBlocked || (choice.pull ? `${pullTitle} from ${choice.pull}` : pullTitle),
+      disabled: busy || Boolean(blocked || pullBlocked),
       onclick: stop(() => runAction(local.id, 'pull', { mode: state.pullMode, ...remoteBody(choice.pull) }))
     }, busyLabel(`${local.id}:pull`, 'Pull')),
     h('button', {
@@ -1366,7 +1374,9 @@ function buildDetail(d) {
     ),
     h('div', { class: 'detail-bar' },
       h('span', { class: 'muted', title: 'Ahead/behind are as of the last fetch' },
-        st.upstream ? `${st.upstream} ↑${st.ahead} ↓${st.behind}` : 'no upstream',
+        !st.upstream ? 'no upstream'
+          : st.upstreamGone ? `${st.upstream} (gone from the remote)`
+            : `${st.upstream} ↑${st.ahead} ↓${st.behind}`,
         d.remotes.length > 0 && ` · ${fetchedText(findLocal(id)?.status)}`),
       h('div', { class: 'spacer' }),
       actionButton('fetch', 'Fetch'),
