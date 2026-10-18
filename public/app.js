@@ -518,6 +518,8 @@ async function runAction(id, action, body = {}) {
   const label = action.replace('-', ' ') + (action === 'pull' ? PULL_FLAGS[body.mode] || '' : '');
   if (repoBusy(id)) {
     toast(`${repoName(id)}: wait for the running action to finish`, true);
+    // Controls that already changed (the branch selector) go back to the actual state
+    if (id === state.selectedId) renderDetail();
     return false;
   }
   return withBusy(`${id}:${action}`, async () => {
@@ -1252,6 +1254,7 @@ function branchSelect(d) {
   return h('select', {
     id: 'branch-select',
     title: 'Switch branch',
+    disabled: repoBusy(d.id),
     onchange: event => {
       const value = event.target.value;
       const name = value.slice(value.indexOf(':') + 1);
