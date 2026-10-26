@@ -55,3 +55,7 @@ jspm_packages/
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# Deploy targets (hold ci-agent webhook tokens)
+deploy-targets.json
+deploy-targets.json.*.tmp

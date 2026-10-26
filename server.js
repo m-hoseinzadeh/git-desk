@@ -1,6 +1,7 @@
 require('dotenv').config();
 const crypto = require('crypto');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { execFile } = require('child_process');
 const express = require('express');
@@ -11,6 +12,7 @@ const { scan } = require('./lib/scanner');
 const { normalize } = require('./lib/remote');
 const git = require('./lib/git');
 const { mapLimit } = require('./lib/concurrency');
+const deployTargets = require('./lib/deploy-targets');
 
 const HOST = '127.0.0.1';
 const PORT = Number(process.env.PORT) || 4321;
@@ -265,8 +267,14 @@ async function repoDetail(repo) {
     lastMessage,
     operation,
     remotes,
-    remoteTracking
+    remoteTracking,
+    deployTarget: deployTarget(repo)
   };
+}
+
+function deployTarget(repo) {
+  const url = deployTargets.get(repo.commonDir);
+  return url ? deployTargets.masked(url) : null;
 }
 
 /**
@@ -343,6 +351,72 @@ async function discard(repo, body) {
   return git.discard(repo.path, files, untracked);
 }
 
+// ci-agent queues the run before it answers, so this only covers the upload
+const DEPLOY_TIMEOUT = 10 * 60 * 1000;
+
+function formatSize(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+async function setDeployTarget(repo, body) {
+  const url = String(body.url || '').trim();
+  if (url) await deployTargets.set(repo.commonDir, url);
+  else await deployTargets.remove(repo.commonDir);
+  return { stdout: '' };
+}
+
+/**
+ * Zip the files of HEAD and upload them to the repository's ci-agent zip webhook
+ */
+async function deploy(repo) {
+  const url = deployTargets.get(repo.commonDir);
+  if (!url) throw badRequest('Set a deploy target first');
+  const commit = await git.headCommit(repo.path);
+  if (!commit) throw badRequest('Nothing to deploy: no commits yet');
+  const target = deployTargets.masked(url);
+
+  const zipFile = path.join(os.tmpdir(), `git-desk-${crypto.randomBytes(8).toString('hex')}.zip`);
+  let response;
+  let size;
+  try {
+    await git.archive(repo.path, zipFile);
+    const zip = await fs.promises.readFile(zipFile);
+    size = zip.length;
+    response = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/zip' },
+      body: zip,
+      signal: AbortSignal.timeout(DEPLOY_TIMEOUT)
+    }).catch(error => {
+      // The URL holds the token, so name only the host
+      const cause = error.name === 'TimeoutError' ? 'timed out' : error.cause?.code || error.message;
+      throw Object.assign(new Error(`Could not reach ci-agent at ${target.host}: ${cause}`), { status: 502 });
+    });
+  } finally {
+    fs.promises.rm(zipFile, { force: true }).catch(() => {});
+  }
+
+  const text = (await response.text()).trim();
+  if (response.status !== 202) {
+    const reasons = {
+      404: 'unknown project or wrong token. Check the webhook URL',
+      413: 'the zip is too large for ci-agent (zip_max_bytes, or nginx client_max_body_size)'
+    };
+    const reason = reasons[response.status] || text.slice(0, 500) || response.statusText;
+    throw Object.assign(new Error(`ci-agent answered ${response.status}: ${reason}`), { status: 502 });
+  }
+  let answer = {};
+  try {
+    answer = JSON.parse(text);
+  } catch {}
+  const lines = [`Uploaded ${commit} (${formatSize(size)}) to ${target.display}`];
+  if (answer.skipped) lines.push(`ci-agent skipped it: ${answer.skipped}`);
+  else lines.push(`ci-agent queued run ${answer.run_id ?? '(no id)'}`);
+  return { stdout: lines.join('\n') };
+}
+
 function optionalString(value) {
   return value === undefined || value === null ? null : String(value);
 }
@@ -370,7 +444,9 @@ const actions = {
   'remote-set-url': (repo, body) => git.setRemoteUrl(repo.path, String(body.name || ''), String(body.url || '').trim(), {
     push: body.push === true
   }),
-  'remote-remove': (repo, body) => git.removeRemote(repo.path, String(body.name || ''))
+  'remote-remove': (repo, body) => git.removeRemote(repo.path, String(body.name || '')),
+  'deploy-target': setDeployTarget,
+  deploy
 };
 
 /**

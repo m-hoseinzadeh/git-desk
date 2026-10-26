@@ -37,6 +37,7 @@ const state = {
   lastAutoFetch: 0,
   drafts: emptyDrafts(),
   remoteEdit: null, // { name, newName, url, pushUrl } while a remote is being edited
+  deployEdit: false, // Changing the saved deploy target
   amend: false,
   pullMode: PULL_MODES.some(([mode]) => mode === readSetting('pullMode')) ? readSetting('pullMode') : 'default',
   filter: '',
@@ -86,7 +87,7 @@ function remoteBody(remote) {
 }
 
 function emptyDrafts() {
-  return { commit: '', branch: '', stash: '', remoteName: '', remoteUrl: '' };
+  return { commit: '', branch: '', stash: '', remoteName: '', remoteUrl: '', deployUrl: '' };
 }
 
 function readSetting(key, fallback) {
@@ -451,6 +452,7 @@ async function selectRepo(id) {
     state.showAllFiles = new Set();
     state.drafts = emptyDrafts();
     state.remoteEdit = null;
+    state.deployEdit = false;
     state.amend = false;
     state.detail = null;
   }
@@ -512,6 +514,8 @@ async function applyDetail(id, detail) {
  * Run a git action on a repository, then refresh its detail and its list summary
  */
 const PULL_FLAGS = { 'ff-only': ' --ff-only', rebase: ' --rebase', merge: ' --no-rebase' };
+// Actions that aren't a git command, shown as "$ <label>"
+const OWN_LABELS = { deploy: 'deploy HEAD', 'deploy-target': 'set deploy target' };
 
 /**
  * @param {Object} options - { fromList }: started from a list row. Its result is a toast,
@@ -519,7 +523,8 @@ const PULL_FLAGS = { 'ff-only': ' --ff-only', rebase: ' --rebase', merge: ' --no
  */
 async function runAction(id, action, body = {}, { fromList = false } = {}) {
   // Shown as "$ git <label>" above the output
-  const label = action.replace('-', ' ') + (action === 'pull' ? PULL_FLAGS[body.mode] || '' : '');
+  const label = OWN_LABELS[action] || action.replace('-', ' ') + (action === 'pull' ? PULL_FLAGS[body.mode] || '' : '');
+  const command = OWN_LABELS[action] ? label : `git ${label}`;
   if (repoBusy(id)) {
     toast(`${repoName(id)}: wait for the running action to finish`, true);
     // Controls that already changed (the branch selector) go back to the actual state
@@ -532,10 +537,10 @@ async function runAction(id, action, body = {}, { fromList = false } = {}) {
       applyLocals(result.locals);
       applySummaries(result.summaries);
       await applyDetail(id, result.detail);
-      const network = ['fetch', 'pull', 'push'].includes(action);
+      const network = ['fetch', 'pull', 'push', 'deploy'].includes(action);
       // Kept per repository, so a pull from the list shows its output when the repository is opened
       if (result.output || network) {
-        state.outputs[id] = { text: `$ git ${label}\n${result.output || 'Nothing new.'}`, error: false };
+        state.outputs[id] = { text: `$ ${command}\n${result.output || 'Nothing new.'}`, error: false };
       } else {
         delete state.outputs[id];
       }
@@ -551,7 +556,7 @@ async function runAction(id, action, body = {}, { fromList = false } = {}) {
       const details = [error.data?.stdout, error.data?.stderr].filter(Boolean).join('\n').trim();
       const hint = details && error.data?.hint ? `\n\nHint: ${error.data.hint}` : '';
       state.outputs[id] = {
-        text: `$ git ${label}\n${details || error.message}${hint}`,
+        text: `$ ${command}\n${details || error.message}${hint}`,
         error: true,
         retry: retryChoices(action, body, error.data?.reason)
       };
@@ -588,6 +593,7 @@ function repoName(id) {
  */
 function successSummary(action, output) {
   const text = output || '';
+  if (action === 'deploy') return text.split('\n').pop();
   if (action === 'fetch') {
     const updated = text.split('\n').filter(line => / -> /.test(line)).length;
     return updated ? `${updated} branch${updated === 1 ? '' : 'es'} updated` : 'nothing new';
@@ -1444,7 +1450,11 @@ function buildDetail(d) {
       h('div', { class: 'bar-group' },
         remoteSelect(d, 'push'),
         actionButton('push', 'Push', remoteBody(pushRemote), 'primary'),
-        forcePush)
+        forcePush),
+      d.deployTarget && h('div', {
+        class: 'bar-group',
+        title: `Zip the last commit and send it to ${d.deployTarget.display}\nUncommitted and untracked files are not included`
+      }, actionButton('deploy', `Deploy to ${d.deployTarget.slug}`))
     ),
     // Right under the buttons that produce it, so the result of a pull or push is in view
     output && h('div', { class: 'block output-block' },
@@ -1559,6 +1569,7 @@ function buildDetail(d) {
       )))
     ),
     remotesBlock(d),
+    deployBlock(d),
     h('div', { class: 'block' },
       h('div', { class: 'block-title' }, h('span', {}, 'Recent commits')),
       d.log.length === 0
@@ -1746,6 +1757,57 @@ function remotesBlock(d) {
       }, busyLabel(`${id}:remote-add`, 'Add remote'))
     ),
     suggestions.length > 0 && h('datalist', { id: 'remote-url-suggestions' }, suggestions)
+  );
+}
+
+/**
+ * The ci-agent zip webhook that Deploy sends the last commit to. The server keeps the URL;
+ * the page only sees it without its token.
+ */
+function deployBlock(d) {
+  const id = d.id;
+  const target = d.deployTarget;
+  const st = d.status;
+  const pending = st.staged.length + st.unstaged.length + st.untracked.length;
+  const save = async () => {
+    const url = state.drafts.deployUrl.trim();
+    if (!url) {
+      toast('Paste the zip webhook URL of the ci-agent project', true);
+      return;
+    }
+    if (await runAction(id, 'deploy-target', { url })) {
+      state.drafts.deployUrl = '';
+      state.deployEdit = false;
+      renderDetail();
+    }
+  };
+  const editing = !target || state.deployEdit;
+
+  return h('div', { class: 'block' },
+    h('div', { class: 'block-title' }, h('span', {}, 'Deploy')),
+    target && !editing && h('ul', { class: 'log remotes' }, h('li', { class: 'remote' },
+      h('span', { class: 'hash' }, target.slug),
+      h('div', { class: 'remote-urls' },
+        h('span', { class: 'subject', title: target.display }, target.display)),
+      h('div', { class: 'remote-buttons' },
+        h('button', { class: 'btn small', onclick: () => { state.deployEdit = true; renderDetail(); } }, 'Change'),
+        h('button', {
+          class: 'btn small danger',
+          disabled: repoBusy(id),
+          onclick: () => {
+            if (confirm(`Forget the deploy target ${target.display}?`)) runAction(id, 'deploy-target', { url: '' });
+          }
+        }, 'Remove')))),
+    editing && h('div', { class: 'stash-row remote-add' },
+      remoteInput('deploy-hook', 'ci-agent zip webhook URL (…/hooks/<project>/<token>/zip)', state.drafts.deployUrl,
+        v => { state.drafts.deployUrl = v; }, save),
+      target && h('button', { class: 'btn small', onclick: () => { state.deployEdit = false; renderDetail(); } }, 'Cancel'),
+      h('button', { class: 'btn small', disabled: repoBusy(id), onclick: save },
+        busyLabel(`${id}:deploy-target`, 'Save'))),
+    h('div', { class: 'muted' }, target
+      ? `Deploy zips the last commit${d.log[0] ? ` (${d.log[0].hash})` : ''} and sends it to ci-agent.` +
+        (pending > 0 ? ` ${pending} uncommitted change${pending === 1 ? '' : 's'} won't be included.` : '')
+      : 'Save a ci-agent zip webhook URL to deploy the last commit of this repository.')
   );
 }
 

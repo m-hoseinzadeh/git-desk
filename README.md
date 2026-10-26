@@ -17,6 +17,7 @@ A Node.js application that connects to your GitHub account, shows the collaborat
   - Ahead/behind and uncommitted-change badges
   - **Fetch all**, and **Pull all**, which fetches everything and then fast-forwards clean repos that are behind
   - **Auto-fetch** (on by default) keeps ahead/behind counts current by fetching quietly on page load and again when you return after 15 minutes
+  - **Deploy** to [ci-agent](../ci-agent): zips the last commit (`git archive HEAD`, so uncommitted and untracked files stay out) and uploads it to a ci-agent project's zip webhook. The webhook URL is saved per repo
   - Clone account repos you don't have locally yet
   - Worktrees are grouped under their main repo; clones of repos outside your account are listed separately
 
@@ -88,11 +89,17 @@ The Sync tab scans the directory above this project (for example `~/repo` if the
 
 Repositories show up as soon as the disk scan finishes and each status fills in as it is read; GitHub matching follows when GitHub answers. Fetch all, Pull all and the Collaborators tab also show each result as it arrives, with a progress bar.
 
-Click a repository to stage files, view diffs, commit, stash, switch or create branches, manage remotes, and pull/push. When you come back to the browser after 10 seconds or more, statuses are refreshed quietly: only rows that changed are redrawn.
+Click a repository to stage files, view diffs, commit, stash, switch or create branches, manage remotes, pull/push, and deploy. When you come back to the browser after 10 seconds or more, statuses are refreshed quietly: only rows that changed are redrawn.
 
 Git runs with your normal credentials (SSH keys, `core.sshCommand`, credential helpers). For `https://github.com` remotes the app also offers your `GITHUB_TOKEN`, but only when your own credential helpers have nothing. Prompts are disabled, so a missing credential shows up as an error instead of hanging.
 
 Sync works without a `GITHUB_TOKEN`; every clone then shows as "local only".
+
+### Deploy
+
+In a repository's **Deploy** block, paste the project's **Zip** webhook URL from ci-agent (Deployments tab → Webhooks; `https://<ci-agent>/hooks/<project>/<token>/zip`). A pasted Git webhook URL is changed to the Zip one. A **Deploy to <project>** button then appears next to Push. It zips the files of the last commit and uploads them, and ci-agent queues a run. Worktrees of a repo share its deploy target.
+
+The URLs are kept in `deploy-targets.json` in this folder (gitignored, readable only by you), because the token in them lets anyone deploy to that project. The page never shows the token. Deploying needs a ci-agent version whose zip webhook accepts an uploaded ZIP.
 
 Use `npm run dev` while working on the app itself: it restarts the server when a file changes.
 
@@ -126,7 +133,7 @@ GitHub's API has rate limits:
 - The web UI listens on `127.0.0.1` only. It rejects requests with a foreign `Host` header and any cross-site write request, so other websites can't trigger git actions.
 - Git only runs inside repositories found by the scan, and file paths sent to the API must stay inside that repository.
 - The token is passed to git through the environment, never on the command line.
-- Never commit your `.env` file to version control
+- Never commit your `.env` or `deploy-targets.json` file to version control
 - Keep your GitHub token secure and don't share it
 - The token gives access to your repositories according to the scopes you selected
 - You can revoke the token anytime from your GitHub settings
