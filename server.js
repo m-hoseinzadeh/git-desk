@@ -367,6 +367,22 @@ async function setDeployTarget(repo, body) {
   return { stdout: '' };
 }
 
+const REDIRECTS = new Set([301, 302, 303, 307, 308]);
+
+function postZip(url, zip, target) {
+  return fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/zip' },
+    body: zip,
+    redirect: 'manual',
+    signal: AbortSignal.timeout(DEPLOY_TIMEOUT)
+  }).catch(error => {
+    // The URL holds the token, so name only the host
+    const cause = error.name === 'TimeoutError' ? 'timed out' : error.cause?.code || error.message;
+    throw Object.assign(new Error(`Could not reach ci-agent at ${target.host}: ${cause}`), { status: 502 });
+  });
+}
+
 /**
  * Zip the files of HEAD and upload them to the repository's ci-agent zip webhook
  */
@@ -380,20 +396,23 @@ async function deploy(repo) {
   const zipFile = path.join(os.tmpdir(), `git-desk-${crypto.randomBytes(8).toString('hex')}.zip`);
   let response;
   let size;
+  let movedTo = null;
   try {
     await git.archive(repo.path, zipFile);
     const zip = await fs.promises.readFile(zipFile);
     size = zip.length;
-    response = await fetch(url, {
-      method: 'POST',
-      headers: { 'content-type': 'application/zip' },
-      body: zip,
-      signal: AbortSignal.timeout(DEPLOY_TIMEOUT)
-    }).catch(error => {
-      // The URL holds the token, so name only the host
-      const cause = error.name === 'TimeoutError' ? 'timed out' : error.cause?.code || error.message;
-      throw Object.assign(new Error(`Could not reach ci-agent at ${target.host}: ${cause}`), { status: 502 });
-    });
+    response = await postZip(url, zip, target);
+    // fetch would follow a redirect as a GET without the zip, so it is followed here, once:
+    // only to the same host and path (http -> https), since the URL carries the token
+    if (REDIRECTS.has(response.status)) {
+      const next = new URL(response.headers.get('location') || '', url);
+      const from = new URL(url);
+      if (next.hostname !== from.hostname || next.pathname !== from.pathname) {
+        throw Object.assign(new Error(`ci-agent redirected the upload to ${next.origin}. Save the webhook URL from that address instead`), { status: 502 });
+      }
+      response = await postZip(next.href, zip, target);
+      movedTo = next.href;
+    }
   } finally {
     fs.promises.rm(zipFile, { force: true }).catch(() => {});
   }
@@ -402,16 +421,23 @@ async function deploy(repo) {
   if (response.status !== 202) {
     const reasons = {
       404: 'unknown project or wrong token. Check the webhook URL',
-      413: 'the zip is too large for ci-agent (zip_max_bytes, or nginx client_max_body_size)'
+      413: 'the zip is too large for ci-agent (zip_max_bytes, or nginx client_max_body_size)',
+      // An empty 422 is an older ci-agent reading the zip as JSON; "zip_url required" means the zip got lost on the way
+      422: text === 'zip_url required'
+        ? 'the zip did not arrive. A proxy in front of ci-agent may have redirected or dropped the upload'
+        : !text && 'this ci-agent version cannot take an uploaded zip. Update ci-agent'
     };
     const reason = reasons[response.status] || text.slice(0, 500) || response.statusText;
     throw Object.assign(new Error(`ci-agent answered ${response.status}: ${reason}`), { status: 502 });
   }
+  // Keep the address that worked, so the next deploy goes there directly
+  if (movedTo) await deployTargets.set(repo.commonDir, movedTo);
   let answer = {};
   try {
     answer = JSON.parse(text);
   } catch {}
-  const lines = [`Uploaded ${commit} (${formatSize(size)}) to ${target.display}`];
+  const lines = [`Uploaded ${commit} (${formatSize(size)}) to ${deployTargets.masked(movedTo || url).display}`];
+  if (movedTo) lines.push('ci-agent redirected to this address; the saved webhook URL now uses it');
   if (answer.skipped) lines.push(`ci-agent skipped it: ${answer.skipped}`);
   else lines.push(`ci-agent queued run ${answer.run_id ?? '(no id)'}`);
   return { stdout: lines.join('\n') };
